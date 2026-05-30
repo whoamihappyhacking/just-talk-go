@@ -35,6 +35,9 @@ type KeyStateTracker struct {
 	// Registered combos that we're watching for
 	watched map[Combo]chan<- Event
 
+	// Modifier-only combos that are currently active.
+	activeModifierCombos map[Combo]bool
+
 	// Per-key listener: keys that, when pressed alone (no other keys),
 	// should fire an event. Used for modifier-only and key-only hotkeys.
 	soloWatch map[KeyCode]Combo
@@ -48,9 +51,10 @@ type KeyStateTracker struct {
 // NewKeyStateTracker creates a new KeyStateTracker.
 func NewKeyStateTracker() *KeyStateTracker {
 	return &KeyStateTracker{
-		pressed:    make(map[KeyCode]keyState),
-		watched:    make(map[Combo]chan<- Event),
-		soloWatch:  make(map[KeyCode]Combo),
+		pressed:              make(map[KeyCode]keyState),
+		watched:              make(map[Combo]chan<- Event),
+		activeModifierCombos: make(map[Combo]bool),
+		soloWatch:            make(map[KeyCode]Combo),
 	}
 }
 
@@ -63,16 +67,7 @@ func (t *KeyStateTracker) Watch(combo Combo, ch chan<- Event) {
 
 	// If this is a solo hotkey (modifier-only or key-only), register for solo tracking
 	if combo.IsModifierOnly() {
-		// Modifier-only: track the modifier key itself
-		modKey := t.modifierToKeyCode(combo.Mods)
-		if len(modKey) == 1 {
-			t.soloWatch[modKey[0]] = combo
-		}
-		// Multi-modifier combos (e.g., Ctrl+Shift) need special handling
-		if len(modKey) > 1 {
-			// Register the last modifier in the combo as the trigger key
-			t.soloWatch[modKey[len(modKey)-1]] = combo
-		}
+		t.activeModifierCombos[combo] = false
 	}
 	if combo.IsKeyOnly() {
 		t.soloWatch[combo.Key] = combo
@@ -85,14 +80,10 @@ func (t *KeyStateTracker) Unwatch(combo Combo) {
 	defer t.mu.Unlock()
 
 	delete(t.watched, combo)
+	delete(t.activeModifierCombos, combo)
 
 	if combo.IsModifierOnly() {
-		modKey := t.modifierToKeyCode(combo.Mods)
-		for _, k := range modKey {
-			if t.soloWatch[k] == combo {
-				delete(t.soloWatch, k)
-			}
-		}
+		return
 	}
 	if combo.IsKeyOnly() {
 		if t.soloWatch[combo.Key] == combo {
@@ -127,6 +118,16 @@ func (t *KeyStateTracker) KeyDown(key KeyCode, now time.Time) []Event {
 		combo := Combo{Mods: t.activeMods, Key: key}
 		if _, ok := t.watched[combo]; ok {
 			events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
+		}
+	} else {
+		for combo, active := range t.activeModifierCombos {
+			if active {
+				continue
+			}
+			if t.activeMods&combo.Mods == combo.Mods {
+				t.activeModifierCombos[combo] = true
+				events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
+			}
 		}
 	}
 
@@ -168,17 +169,13 @@ func (t *KeyStateTracker) KeyUp(key KeyCode, now time.Time) []Event {
 		events = append(events, Event{Combo: combo, Type: KeyUp, Time: now})
 	}
 
-	// Check for modifier-only key release: if this is a modifier and no
-	// non-modifier key was pressed while it was held, fire the solo event.
 	if key.IsModifier() {
-		// Only fire if no non-modifier key was pressed during this modifier hold
-		if t.lastNonModKey == KeyNone || t.lastNonModKey == key {
-			if combo, ok := t.soloWatch[key]; ok && combo.IsModifierOnly() {
-				// Verify the full modifier mask matches
-				if t.modsMatchSolo(combo) {
-					events = append(events, Event{Combo: combo, Type: KeyPress, Time: now})
-				}
-				// Fire KeyUp for modifier-only
+		for combo, active := range t.activeModifierCombos {
+			if !active {
+				continue
+			}
+			if t.activeMods&combo.Mods != combo.Mods {
+				t.activeModifierCombos[combo] = false
 				events = append(events, Event{Combo: combo, Type: KeyUp, Time: now})
 			}
 		}
@@ -219,6 +216,9 @@ func (t *KeyStateTracker) Reset() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.pressed = make(map[KeyCode]keyState)
+	for combo := range t.activeModifierCombos {
+		t.activeModifierCombos[combo] = false
+	}
 	t.activeMods = ModNone
 	t.lastNonModKey = KeyNone
 }

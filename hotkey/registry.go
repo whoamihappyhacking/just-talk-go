@@ -14,8 +14,10 @@ import (
 type Registry struct {
 	provider Provider
 
-	mu       sync.RWMutex
-	handlers map[Combo]handlerEntry
+	mu          sync.RWMutex
+	handlers    map[Combo]handlerEntry
+	dispatchCtx context.Context
+	started     bool
 }
 
 type handlerEntry struct {
@@ -55,6 +57,11 @@ func (r *Registry) Register(combo Combo, handler func(Event)) error {
 		ch:      ch,
 	}
 
+	// Start dispatch goroutine for late-registered handlers
+	if r.started {
+		go r.dispatch(r.dispatchCtx, r.handlers[combo])
+	}
+
 	return nil
 }
 
@@ -85,18 +92,29 @@ func (r *Registry) Unregister(combo Combo) error {
 // This call blocks until ctx is cancelled or Stop() is called.
 func (r *Registry) Start(ctx context.Context) error {
 	// Start the fan-out dispatcher
-	dispatchCtx, cancel := context.WithCancel(ctx)
+	var cancel context.CancelFunc
+	r.dispatchCtx, cancel = context.WithCancel(ctx)
 	defer cancel()
+
+	r.mu.Lock()
+	r.started = true
+	r.mu.Unlock()
 
 	// Launch per-handler dispatch goroutines
 	r.mu.RLock()
 	for _, entry := range r.handlers {
-		go r.dispatch(dispatchCtx, entry)
+		go r.dispatch(r.dispatchCtx, entry)
 	}
 	r.mu.RUnlock()
 
 	// Run the provider (this blocks)
-	return r.provider.Start(ctx)
+	err := r.provider.Start(ctx)
+
+	r.mu.Lock()
+	r.started = false
+	r.mu.Unlock()
+
+	return err
 }
 
 // Stop signals the registry to stop listening.

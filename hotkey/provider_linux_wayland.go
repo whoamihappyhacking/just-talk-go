@@ -60,9 +60,9 @@ var evdevKeyToUnified = map[uint16]KeyCode{
 	82: KeyNum0, 83: KeyNumDecimal,
 
 	// Modifiers (left/right merged)
-	29:  KeyCtrl,  97:  KeyCtrl,  // LEFTCTRL, RIGHTCTRL
-	56:  KeyAlt,   100: KeyAlt,   // LEFTALT, RIGHTALT
-	42:  KeyShift, 54:  KeyShift, // LEFTSHIFT, RIGHTSHIFT
+	29: KeyCtrl, 97: KeyCtrl, // LEFTCTRL, RIGHTCTRL
+	56: KeyAlt, 100: KeyAlt, // LEFTALT, RIGHTALT
+	42: KeyShift, 54: KeyShift, // LEFTSHIFT, RIGHTSHIFT
 	125: KeySuper, 126: KeySuper, // LEFTMETA, RIGHTMETA
 
 	// Function keys
@@ -73,20 +73,20 @@ var evdevKeyToUnified = map[uint16]KeyCode{
 	187: KeyF17, 188: KeyF18, 189: KeyF19, 190: KeyF20,
 
 	// Navigation
-	57:  KeySpace,   15: KeyTab,
-	28:  KeyEnter,   1:  KeyEscape,
-	14:  KeyBackspace, 58: KeyCapsLock,
+	57: KeySpace, 15: KeyTab,
+	28: KeyEnter, 1: KeyEscape,
+	14: KeyBackspace, 58: KeyCapsLock,
 	103: KeyArrowUp, 108: KeyArrowDown,
 	105: KeyArrowLeft, 106: KeyArrowRight,
-	102: KeyHome,    107: KeyEnd,
-	104: KeyPageUp,  109: KeyPageDown,
-	110: KeyInsert,  111: KeyDelete,
+	102: KeyHome, 107: KeyEnd,
+	104: KeyPageUp, 109: KeyPageDown,
+	110: KeyInsert, 111: KeyDelete,
 
 	// Punctuation
 	41: KeyBacktick, 12: KeyMinus, 13: KeyEqual,
 	26: KeyLeftBracket, 27: KeyRightBracket,
 	43: KeyBackslash, 39: KeySemicolon, 40: KeyQuote,
-	51: KeyComma,    52: KeyPeriod, 53: KeySlash,
+	51: KeyComma, 52: KeyPeriod, 53: KeySlash,
 }
 
 type waylandProvider struct {
@@ -147,34 +147,30 @@ func (p *waylandProvider) Start(ctx context.Context) error {
 		return fmt.Errorf("find keyboard devices: %w", err)
 	}
 	if len(devices) == 0 {
-		return fmt.Errorf("no keyboard devices found under /dev/input/ (try running with sudo or add user to 'input' group)")
+		return fmt.Errorf("no input event devices found under /dev/input/")
 	}
 
 	p.logger.Info("found keyboard devices", "count", len(devices), "devices", devices)
 
-	// Open and grab each keyboard device
+	// Open keyboard devices for passive reads. Do not EVIOCGRAB here: grabbing
+	// steals the keyboard from the compositor, which is not acceptable under
+	// Sway/Wayland for a background hotkey listener.
 	for _, dev := range devices {
-		fd, err := unix.Open(dev, unix.O_RDONLY, 0)
+		fd, err := unix.Open(dev, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 		if err != nil {
 			p.logger.Warn("cannot open device", "device", dev, "error", err)
 			continue
 		}
 
-		// Try to grab the device for exclusive access
-		if err := unix.IoctlSetInt(fd, eviocGrab, 1); err != nil {
-			p.logger.Warn("cannot grab device (may need root)", "device", dev, "error", err)
-			unix.Close(fd)
-			continue
-		}
-
 		p.deviceFds = append(p.deviceFds, fd)
+		p.logger.Debug("opened input device", "device", dev)
 	}
 
 	if len(p.deviceFds) == 0 {
-		return fmt.Errorf("could not open any keyboard devices")
+		return fmt.Errorf("could not open any keyboard devices; add the user to the input group or grant read access to /dev/input/event*")
 	}
 
-	p.logger.Info("grabbed keyboard devices", "count", len(p.deviceFds))
+	p.logger.Info("opened keyboard devices", "count", len(p.deviceFds))
 
 	// Read events from all devices
 	return p.readLoop(ctx)
@@ -262,9 +258,7 @@ func (p *waylandProvider) Stop() error {
 	}
 	p.stopped = true
 
-	// Release grabs and close devices
 	for _, fd := range p.deviceFds {
-		unix.IoctlSetInt(fd, eviocGrab, 0)
 		unix.Close(fd)
 	}
 	p.deviceFds = nil
@@ -305,25 +299,7 @@ func findKeyboardDevices() ([]string, error) {
 		}
 		devPath := "/dev/input/" + entry.Name()
 
-		// Try to determine if this is a keyboard by checking EV_KEY capability
-		fd, err := unix.Open(devPath, unix.O_RDONLY|unix.O_NONBLOCK, 0)
-		if err != nil {
-			continue
-		}
-
-		// EVIOCGBIT(0, EV_MAX) — check for EV_KEY bit
-		// We simply assume all /dev/input/event* devices are potential keyboards.
-		// Proper keyboard detection via EVIOCGBIT is possible but requires
-		// complex ioctl handling. Non-keyboard devices will just not produce
-		// useful key events.
-		unix.Close(fd)
-
 		devices = append(devices, devPath)
-	}
-
-	// Limit to common keyboard device count
-	if len(devices) > 10 {
-		devices = devices[:10]
 	}
 
 	return devices, nil

@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/c/just-talk-go/config"
 	"github.com/c/just-talk-go/hotkey"
 )
 
@@ -50,8 +51,17 @@ type PluginEnv interface {
 	// Logger returns the plugin's logger (pre-configured with plugin name).
 	Logger() *slog.Logger
 
+	// Config returns the application configuration.
+	Config() *config.Config
+
 	// Engine returns a reference to the engine (for advanced use).
 	Engine() *Engine
+}
+
+// Reloader is an optional interface that plugins can implement to
+// receive notifications when the configuration file is hot-reloaded.
+type Reloader interface {
+	OnConfigReload(cfg *config.Config) error
 }
 
 // basePlugin provides a default implementation for optional methods.

@@ -1,45 +1,65 @@
-// just-talk is a cross-platform global hotkey daemon.
-//
-// It listens for global hotkeys and dispatches events to plugins.
-// Future plugins include voice input, text expansion, and more.
-//
-// Usage:
-//
-//	just-talk [flags]
-//
-// Flags:
-//
-//	--backend string   Force a specific backend (x11, wayland, darwin, windows, mock)
-//	--debug            Enable the debug plugin (prints hotkey events to stdout)
-//	--verbose          Enable verbose logging
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
+	"github.com/c/just-talk-go/config"
 	"github.com/c/just-talk-go/engine"
 	"github.com/c/just-talk-go/hotkey"
+	"github.com/c/just-talk-go/internal/tui"
 	"github.com/c/just-talk-go/plugins"
+	"github.com/c/just-talk-go/plugins/overlay"
+	"github.com/c/just-talk-go/plugins/voice"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
-	backend := flag.String("backend", "", "force backend: x11, wayland, darwin, windows, mock")
-	debug := flag.Bool("debug", true, "enable debug plugin")
+	backend := flag.String("backend", "", "force backend")
+	cfgPath := flag.String("config", "", "path to config file")
+	debug := flag.Bool("debug", false, "enable debug plugin")
 	verbose := flag.Bool("verbose", false, "verbose logging")
+	useTUI := flag.Bool("tui", true, "run with terminal UI")
+	noTUI := flag.Bool("no-tui", false, "run without terminal UI")
 	flag.Parse()
+	if *noTUI {
+		*useTUI = false
+	}
 
-	// Configure logging
 	logLevel := slog.LevelInfo
 	if *verbose {
 		logLevel = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 
-	// Allow backend override via environment if not set via flag
+	// Daemon mode: log to stderr + file. TUI mode: file only (stderr corrupts display).
+	var logWriter io.Writer
+	if *useTUI {
+		lf, _ := os.OpenFile("/tmp/just-talk.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if lf != nil {
+			logWriter = lf
+		} else {
+			logWriter = io.Discard
+		}
+	} else {
+		lf, _ := os.OpenFile("/tmp/just-talk.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if lf != nil {
+			logWriter = io.MultiWriter(os.Stderr, lf)
+		} else {
+			logWriter = os.Stderr
+		}
+	}
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: logLevel}))
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		logger.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
 	if *backend == "" {
 		*backend = os.Getenv("JUST_TALK_BACKEND")
 	}
@@ -47,44 +67,62 @@ func main() {
 		os.Setenv("JUST_TALK_BACKEND", *backend)
 	}
 
-	// Create provider
 	provider, err := createProvider(*backend)
 	if err != nil {
 		logger.Error("failed to create provider", "error", err)
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		fmt.Fprintf(os.Stderr, "\nTroubleshooting:\n")
-		fmt.Fprintf(os.Stderr, "  X11:      Ensure $DISPLAY is set\n")
-		fmt.Fprintf(os.Stderr, "  Wayland:  Add user to 'input' group: sudo usermod -aG input $USER\n")
-		fmt.Fprintf(os.Stderr, "  macOS:    Grant Accessibility permission in System Settings\n")
-		fmt.Fprintf(os.Stderr, "  Test:     Use --backend mock\n")
+		printTroubleshooting(err)
 		os.Exit(1)
 	}
+	logger.Info("provider created", "platform", provider.Info().Platform, "backend", provider.Info().Backend)
 
-	info := provider.Info()
-	logger.Info("provider created",
-		"platform", info.Platform,
-		"backend", info.Backend,
-		"features", info.Features,
-	)
+	eng := engine.New(provider, cfg, logger)
 
-	// Create engine
-	eng := engine.New(provider, logger)
-
-	// Load debug plugin
-	if *debug {
-		dp := plugins.NewDebugPlugin(nil)
-		if err := eng.LoadPlugin(dp); err != nil {
-			logger.Error("failed to load debug plugin", "error", err)
-			os.Exit(1)
-		}
+	if *debug && cfg.Debug.Enabled {
+		eng.LoadPlugin(plugins.NewDebugPlugin())
+	}
+	if cfg.Voice.Enabled {
+		eng.LoadPlugin(voice.NewVoicePlugin())
+	}
+	if cfg.Voice.Enabled && cfg.Overlay.Enabled {
+		eng.LoadPlugin(overlay.NewOverlayPlugin())
+	}
+	if p := config.FindConfig(); p != "" {
+		eng.WatchConfig(p)
 	}
 
-	// Start and run until signal
-	logger.Info("just-talk started — press hotkeys to see events, Ctrl+C to quit")
+	if *useTUI {
+		runTUI(eng, cfg, *debug)
+	} else {
+		runDaemon(eng)
+	}
+}
+
+func runDaemon(eng *engine.Engine) {
+	slog.Info("just-talk started — press hotkeys, Ctrl+C to quit")
 	if err := eng.Start(true); err != nil && err != context.Canceled {
-		logger.Error("engine exited with error", "error", err)
+		slog.Error("engine exited with error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func runTUI(eng *engine.Engine, cfg *config.Config, debug bool) {
+	voice.SetupTUILog()
+	// voice output goes to TUI log
+	model := tui.New(cfg)
+	model.SetDebug(debug)
+	model.OnSave = func(c *config.Config) error { return eng.ReloadConfig(c) }
+	go func() {
+		if err := eng.Start(false); err != nil && err != context.Canceled {
+			slog.Error("engine error", "error", err)
+		}
+	}()
+	go func() { model.Update(tui.SetProviderInfo(eng.Provider().Info())) }()
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		os.Exit(1)
+	}
+	eng.Stop()
 }
 
 func createProvider(backend string) (hotkey.Provider, error) {
@@ -92,4 +130,11 @@ func createProvider(backend string) (hotkey.Provider, error) {
 		return hotkey.NewMockProvider(), nil
 	}
 	return hotkey.NewProvider()
+}
+
+func printTroubleshooting(err error) {
+	fmt.Fprintf(os.Stderr, "Error: %v\n\nTroubleshooting:\n", err)
+	fmt.Fprintf(os.Stderr, "  X11:      Ensure $DISPLAY is set\n")
+	fmt.Fprintf(os.Stderr, "  Wayland:  Add user to 'input' group\n")
+	fmt.Fprintf(os.Stderr, "  macOS:    Grant Accessibility permission\n")
 }

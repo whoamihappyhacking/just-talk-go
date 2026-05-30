@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"sync"
 	"syscall"
 
+	"github.com/c/just-talk-go/config"
 	"github.com/c/just-talk-go/hotkey"
+	"github.com/fsnotify/fsnotify"
 )
 
 // Engine is the application coordinator.
@@ -23,6 +26,7 @@ type Engine struct {
 	provider hotkey.Provider
 	plugins  []Plugin
 	logger   *slog.Logger
+	cfg      *config.Config
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -31,12 +35,13 @@ type Engine struct {
 	mu sync.Mutex
 }
 
-// New creates a new Engine with the given hotkey provider and logger.
-func New(provider hotkey.Provider, logger *slog.Logger) *Engine {
+// New creates a new Engine with the given hotkey provider, config, and logger.
+func New(provider hotkey.Provider, cfg *config.Config, logger *slog.Logger) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Engine{
 		provider: provider,
 		registry: hotkey.NewRegistry(provider),
+		cfg:      cfg,
 		logger:   logger,
 		ctx:      ctx,
 		cancel:   cancel,
@@ -131,6 +136,21 @@ func (e *Engine) Start(waitSignal bool) error {
 }
 
 // Stop gracefully shuts down the engine.
+// ReloadConfig reloads configuration and notifies all plugins.
+func (e *Engine) ReloadConfig(cfg *config.Config) error {
+	e.mu.Lock()
+	e.cfg = cfg
+	e.mu.Unlock()
+	for _, p := range e.plugins {
+		if r, ok := p.(Reloader); ok {
+			if err := r.OnConfigReload(cfg); err != nil {
+				return fmt.Errorf("%s: %w", p.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -166,12 +186,74 @@ func (e *Engine) handleSignals() {
 	signal.Stop(sigCh)
 }
 
+// WatchConfig starts a file watcher that hot-reloads the config.
+// When the config file changes, all plugins implementing Reloader
+// receive OnConfigReload with the new config.
+func (e *Engine) WatchConfig(path string) {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		e.logger.Error("failed to create config watcher", "error", err)
+		return
+	}
+
+	// Watch the directory, not the file — file truncation (os.Create)
+	// removes the old inode and fsnotify loses the file watch.
+	if err := watcher.Add(dir); err != nil {
+		e.logger.Error("failed to watch config dir", "dir", dir, "error", err)
+		watcher.Close()
+		return
+	}
+
+	e.logger.Info("watching config for changes", "dir", dir, "file", base)
+
+	go func() {
+		defer watcher.Close()
+		for {
+			select {
+			case <-e.ctx.Done():
+				return
+			case event, ok := <-watcher.Events:
+				if !ok { return }
+				if filepath.Base(event.Name) != base { continue }
+				if event.Has(fsnotify.Write) {
+					e.logger.Info("config file changed, reloading", "path", path)
+					newCfg, err := config.Load(path)
+					if err != nil {
+						e.logger.Error("failed to reload config", "error", err)
+						continue
+					}
+					// Update engine config
+					e.mu.Lock()
+					if e.ctx.Err() != nil { e.mu.Unlock(); return }
+					e.cfg = newCfg
+					e.mu.Unlock()
+					// Notify plugins
+					for _, p := range e.plugins {
+						if r, ok := p.(Reloader); ok {
+							if err := r.OnConfigReload(newCfg); err != nil {
+								e.logger.Error("plugin config reload failed", "plugin", p.Name(), "error", err)
+							}
+						}
+					}
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok { return }
+				e.logger.Error("config watcher error", "error", err)
+			}
+		}
+	}()
+}
+
 // ---- pluginEnvAdapter implements PluginEnv ----
 
 type pluginEnvAdapter struct {
 	engine  *Engine
 	plugin  Plugin
 	handler *hotkey.Registry
+	cfg     *config.Config
 	logger  *slog.Logger
 }
 
@@ -185,6 +267,10 @@ func (a *pluginEnvAdapter) UnregisterHotkey(combo hotkey.Combo) error {
 
 func (a *pluginEnvAdapter) Logger() *slog.Logger {
 	return a.logger
+}
+
+func (a *pluginEnvAdapter) Config() *config.Config {
+	return a.engine.cfg // Always return current (supports hot-reload)
 }
 
 func (a *pluginEnvAdapter) Engine() *Engine {

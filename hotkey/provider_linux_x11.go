@@ -19,7 +19,7 @@ package hotkey
 // 	return 0;
 // }
 //
-// static void x11_install_error_handler() {
+// static void x11_install_handler() {
 // 	XSetErrorHandler(x11_error_handler);
 // }
 //
@@ -27,8 +27,8 @@ package hotkey
 // static int x11_safe_grab_key(Display *dpy, int keycode, unsigned int modifiers, Window grab_window) {
 // 	// owner_events=False: events always reported to us, won't fail on other clients' active grabs.
 // 	// GrabModeAsync: keyboard event processing continues normally for other clients.
-// 	// No XSync here — caller batches sync after all grabs to reduce round-trips.
 // 	XGrabKey(dpy, keycode, modifiers, grab_window, False, GrabModeAsync, GrabModeAsync);
+// 	XSync(dpy, False);
 // 	return 0;
 // }
 //
@@ -66,10 +66,10 @@ const (
 // When grabbing a key, we must grab it with all combinations of these
 // "lock" modifiers so the hotkey works regardless of lock state.
 var x11IgnoredMasks = []uint{
-	0, // No lock modifier — the base case, most important
-	x11LockMask,                     // CapsLock
-	x11Mod2Mask,                     // NumLock
-	x11Mod3Mask,                     // ScrollLock
+	0,           // No lock modifier — the base case, most important
+	x11LockMask, // CapsLock
+	x11Mod2Mask, // NumLock
+	x11Mod3Mask, // ScrollLock
 	x11LockMask | x11Mod2Mask,
 	x11LockMask | x11Mod3Mask,
 	x11Mod2Mask | x11Mod3Mask,
@@ -88,9 +88,9 @@ var x11KeysymToUnified = map[C.KeySym]KeyCode{
 	C.XK_5: Key5, C.XK_6: Key6, C.XK_7: Key7, C.XK_8: Key8, C.XK_9: Key9,
 
 	C.XK_Control_L: KeyCtrl, C.XK_Control_R: KeyCtrl,
-	C.XK_Alt_L:  KeyAlt,    C.XK_Alt_R:     KeyAlt,
-	C.XK_Shift_L: KeyShift,  C.XK_Shift_R:   KeyShift,
-	C.XK_Super_L: KeySuper,  C.XK_Super_R:   KeySuper,
+	C.XK_Alt_L: KeyAlt, C.XK_Alt_R: KeyAlt,
+	C.XK_Shift_L: KeyShift, C.XK_Shift_R: KeyShift,
+	C.XK_Super_L: KeySuper, C.XK_Super_R: KeySuper,
 
 	C.XK_F1: KeyF1, C.XK_F2: KeyF2, C.XK_F3: KeyF3, C.XK_F4: KeyF4,
 	C.XK_F5: KeyF5, C.XK_F6: KeyF6, C.XK_F7: KeyF7, C.XK_F8: KeyF8,
@@ -99,21 +99,21 @@ var x11KeysymToUnified = map[C.KeySym]KeyCode{
 	C.XK_F17: KeyF17, C.XK_F18: KeyF18, C.XK_F19: KeyF19, C.XK_F20: KeyF20,
 	C.XK_F21: KeyF21, C.XK_F22: KeyF22, C.XK_F23: KeyF23, C.XK_F24: KeyF24,
 
-	C.XK_space: KeySpace,    C.XK_Tab:   KeyTab,
-	C.XK_Return: KeyEnter,   C.XK_Escape: KeyEscape,
+	C.XK_space: KeySpace, C.XK_Tab: KeyTab,
+	C.XK_Return: KeyEnter, C.XK_Escape: KeyEscape,
 	C.XK_BackSpace: KeyBackspace, C.XK_Caps_Lock: KeyCapsLock,
-	C.XK_Up:    KeyArrowUp,    C.XK_Down:  KeyArrowDown,
-	C.XK_Left:  KeyArrowLeft,   C.XK_Right: KeyArrowRight,
-	C.XK_Home:  KeyHome,       C.XK_End:   KeyEnd,
-	C.XK_Prior: KeyPageUp,     C.XK_Next:  KeyPageDown,
-	C.XK_Insert: KeyInsert,    C.XK_Delete: KeyDelete,
+	C.XK_Up: KeyArrowUp, C.XK_Down: KeyArrowDown,
+	C.XK_Left: KeyArrowLeft, C.XK_Right: KeyArrowRight,
+	C.XK_Home: KeyHome, C.XK_End: KeyEnd,
+	C.XK_Prior: KeyPageUp, C.XK_Next: KeyPageDown,
+	C.XK_Insert: KeyInsert, C.XK_Delete: KeyDelete,
 
-	C.XK_grave:      KeyBacktick,    C.XK_minus:    KeyMinus,
-	C.XK_equal:      KeyEqual,       C.XK_bracketleft:  KeyLeftBracket,
+	C.XK_grave: KeyBacktick, C.XK_minus: KeyMinus,
+	C.XK_equal: KeyEqual, C.XK_bracketleft: KeyLeftBracket,
 	C.XK_bracketright: KeyRightBracket, C.XK_backslash: KeyBackslash,
-	C.XK_semicolon:  KeySemicolon,   C.XK_apostrophe: KeyQuote,
-	C.XK_comma:      KeyComma,       C.XK_period:  KeyPeriod,
-	C.XK_slash:      KeySlash,
+	C.XK_semicolon: KeySemicolon, C.XK_apostrophe: KeyQuote,
+	C.XK_comma: KeyComma, C.XK_period: KeyPeriod,
+	C.XK_slash: KeySlash,
 }
 
 type x11Provider struct {
@@ -138,7 +138,7 @@ type x11Provider struct {
 
 func newX11Provider() (Provider, error) {
 	// Install X error handler to prevent BadAccess crashes
-	C.x11_install_error_handler()
+	C.x11_install_handler()
 
 	display := C.XOpenDisplay(nil)
 	if display == nil {
@@ -185,7 +185,6 @@ func (p *x11Provider) Register(combo Combo) (<-chan Event, error) {
 		}
 		p.grabbedKeys[uint(g.keycode)] = true
 	}
-	C.XSync(p.display, C.False)
 
 	return ch, nil
 }
@@ -250,6 +249,16 @@ func (p *x11Provider) Start(ctx context.Context) error {
 		// Check context
 		select {
 		case <-ctx.Done():
+			// Clean shutdown: release grabs, flush, close display
+			p.mu.Lock()
+			for combo := range p.channels {
+				grabs := p.comboToX11Grabs(combo)
+				p.releaseGrabs(grabs)
+			}
+			p.mu.Unlock()
+			C.XFlush(p.display)
+			C.XCloseDisplay(p.display)
+			p.display = nil
 			syscall.Close(p.stopFd)
 			_ = fds[1]
 			return ctx.Err()
@@ -279,29 +288,33 @@ func (p *x11Provider) handleKeyEvent(event *C.XEvent, isRelease bool) {
 	keycode := keyEvt.keycode
 	state := keyEvt.state
 
-	fmt.Fprintf(os.Stderr, "[dbg] key event: kc=%d state=%d release=%v\n", keycode, state, isRelease)
+	// Convert keycode to keysym before filtering releases. For modifier-only
+	// grabs, one modifier may have been pressed before the passive grab became
+	// active, so we can legitimately receive its KeyRelease without seeing its
+	// KeyPress.
+	keysym := C.XkbKeycodeToKeysym(p.display, C.KeyCode(keycode), 0, 0)
+	key := x11KeysymToUnified[keysym]
+	if key == KeyNone {
+		return
+	}
 
-	// AutoRepeat detection: on X11, auto-repeat generates KeyRelease+KeyPress pairs.
+	// AutoRepeat: on X11, auto-repeat generates KeyRelease+KeyPress pairs.
 	// We ignore auto-repeat KeyRelease by checking if the key is currently marked pressed.
 	if isRelease {
 		if !p.pressedKeys[uint(keycode)] {
-			// This is the auto-repeat "fake" release — ignore
-			return
+			if !key.IsModifier() {
+				// This is the auto-repeat "fake" release — ignore
+				return
+			}
+		} else {
+			delete(p.pressedKeys, uint(keycode))
 		}
-		delete(p.pressedKeys, uint(keycode))
 	} else {
 		if p.pressedKeys[uint(keycode)] {
 			// Auto-repeat press — ignore
 			return
 		}
 		p.pressedKeys[uint(keycode)] = true
-	}
-
-	// Convert keycode to keysym
-	keysym := C.XkbKeycodeToKeysym(p.display, C.KeyCode(keycode), 0, 0)
-	key := x11KeysymToUnified[keysym]
-	if key == KeyNone {
-		return
 	}
 
 	// Convert X11 state to Modifier
@@ -377,11 +390,6 @@ func (p *x11Provider) Stop() error {
 		delete(p.channels, combo)
 	}
 
-	if p.display != nil {
-		C.XCloseDisplay(p.display)
-		p.display = nil
-	}
-
 	return nil
 }
 
@@ -453,15 +461,17 @@ func (p *x11Provider) modifierOnlyGrabs(mods Modifier) []x11Grab {
 				prefixMask |= modsToX11Mask(other)
 			}
 		}
-		keysym := modifierToKeysym(trigger)
-		if keysym == 0 {
+		keysyms := modifierToKeysyms(trigger)
+		if len(keysyms) == 0 {
 			continue
 		}
-		keycode := C.XKeysymToKeycode(p.display, keysym)
-		if keycode == 0 {
-			continue
+		for _, keysym := range keysyms {
+			keycode := C.XKeysymToKeycode(p.display, keysym)
+			if keycode == 0 {
+				continue
+			}
+			grabs = append(grabs, x11Grab{keycode: keycode, modMask: prefixMask})
 		}
-		grabs = append(grabs, x11Grab{keycode: keycode, modMask: prefixMask})
 	}
 	return grabs
 }
@@ -477,19 +487,19 @@ func modifierBits(mods Modifier) []Modifier {
 	return bits
 }
 
-// modifierToKeysym maps a single Modifier bit to its X11 keysym.
-func modifierToKeysym(m Modifier) C.KeySym {
+// modifierToKeysyms maps a single Modifier bit to all matching X11 keysyms.
+func modifierToKeysyms(m Modifier) []C.KeySym {
 	switch m {
 	case ModCtrl:
-		return C.XK_Control_L
+		return []C.KeySym{C.XK_Control_L, C.XK_Control_R}
 	case ModAlt:
-		return C.XK_Alt_L
+		return []C.KeySym{C.XK_Alt_L, C.XK_Alt_R}
 	case ModShift:
-		return C.XK_Shift_L
+		return []C.KeySym{C.XK_Shift_L, C.XK_Shift_R}
 	case ModSuper:
-		return C.XK_Super_L
+		return []C.KeySym{C.XK_Super_L, C.XK_Super_R}
 	}
-	return 0
+	return nil
 }
 
 // Legacy: kept for Unregister compatibility

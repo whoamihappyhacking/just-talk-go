@@ -1,0 +1,20 @@
+# Build outputs
+/build/
+/just-talk
+/cmd/just-talk/just-talk
+*.exe
+
+# Local runtime files
+*.log
+*.tmp
+
+# Local configuration and state
+config.toml
+.env
+
+# Local reference notes
+/doubao-asr-doc.md
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
