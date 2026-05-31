@@ -56,6 +56,7 @@ type Model struct {
 	devices     []string
 	cfg         *config.Config
 	debug       bool
+	showLogs    bool
 	OnSave      func(*config.Config) error
 	fields      []field
 	cursor      int
@@ -68,7 +69,8 @@ func New(cfg *config.Config) *Model {
 	vc := cfg.Voice
 	ti := func(v string) textinput.Model { t := textinput.New(); t.SetValue(v); t.Cursor.Blink = false; return t }
 	fs := []field{
-		{label: "热键", key: "push_to_talk", help: "例: Alt+Super", fType: fString, input: ti(vc.PushToTalk)},
+		{label: "语音输入", key: "enabled", help: "关闭后不注册热键", fType: fToggle, boolVal: vc.Enabled},
+		{label: "热键", key: "push_to_talk", help: "例: Alt+Super；macOS: Option=Alt, Command/Cmd=Super", fType: fString, input: ti(vc.PushToTalk)},
 		{label: "模式", key: "mode", help: "toggle 切换 / hold 按住", fType: fSelect, opts: []string{"toggle", "hold"}, optIdx: idxOf([]string{"toggle", "hold"}, vc.Mode)},
 		{label: "App Key", key: "app_key", help: "火山 App ID", fType: fString, input: ti(vc.AppKey)},
 		{label: "Access Key", key: "access_key", help: "火山 Access Token", fType: fString, input: ti(vc.AccessKey)},
@@ -76,7 +78,7 @@ func New(cfg *config.Config) *Model {
 		{label: "停止延迟(ms)", key: "stop_delay_ms", help: "松手后补录毫秒", fType: fString, input: ti(fmt.Sprintf("%d", vc.StopDelayMs))},
 		{label: "热词", key: "hotwords", help: "逗号分隔术语", fType: fString, input: ti(strings.Join(vc.Hotwords, ", "))},
 	}
-	return &Model{cfg: cfg, fields: fs, logs: make([]string, 0, 100), cursor: -1}
+	return &Model{cfg: cfg, fields: fs, logs: make([]string, 0, 100), cursor: -1, showLogs: true}
 }
 
 func (m *Model) SetDebug(debug bool) {
@@ -198,7 +200,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 	case "l":
-		m.logExpanded = !m.logExpanded
+		if m.showLogs {
+			m.logExpanded = !m.logExpanded
+		}
 	case "h":
 		m.helpVisible = !m.helpVisible
 	}
@@ -208,6 +212,8 @@ func (m *Model) save() {
 	vc := &m.cfg.Voice
 	for _, f := range m.fields {
 		switch f.key {
+		case "enabled":
+			vc.Enabled = f.boolVal
 		case "push_to_talk":
 			vc.PushToTalk = f.input.Value()
 		case "mode":
@@ -282,26 +288,28 @@ func (m *Model) View() string {
 	}
 	b.WriteString("\n" + lStyle.Render("── 录音状态 ──") + "\n")
 	b.WriteString("  " + m.renderVoiceStatus() + "\n")
-	b.WriteString("\n" + lStyle.Render("── 日志 (l 展开) ──") + "\n")
-	maxLogs := 5
-	if m.logExpanded {
-		maxLogs = 100
-	}
-	// TUI internal logs
-	s := 0
-	if len(m.logs) > maxLogs {
-		s = len(m.logs) - maxLogs
-	}
-	for _, l := range m.logs[s:] {
-		b.WriteString("  " + dStyle.Render(l) + "\n")
-	}
-	// Voice plugin logs
-	sv := 0
-	if len(voice.TUILogBuf) > maxLogs {
-		sv = len(voice.TUILogBuf) - maxLogs
-	}
-	for _, l := range voice.TUILogBuf[sv:] {
-		b.WriteString("  " + dStyle.Render(l) + "\n")
+	if m.showLogs {
+		b.WriteString("\n" + lStyle.Render("── 日志 (l 展开) ──") + "\n")
+		maxLogs := 5
+		if m.logExpanded {
+			maxLogs = 100
+		}
+		// TUI internal logs
+		s := 0
+		if len(m.logs) > maxLogs {
+			s = len(m.logs) - maxLogs
+		}
+		for _, l := range m.logs[s:] {
+			b.WriteString("  " + dStyle.Render(l) + "\n")
+		}
+		// Voice plugin logs
+		sv := 0
+		if len(voice.TUILogBuf) > maxLogs {
+			sv = len(voice.TUILogBuf) - maxLogs
+		}
+		for _, l := range voice.TUILogBuf[sv:] {
+			b.WriteString("  " + dStyle.Render(l) + "\n")
+		}
 	}
 	b.WriteString(hStyle.Render("  j/k 导航 | e 编辑 | h 帮助 | esc 退出编辑 | s 保存 | q 退出"))
 	return b.String()
@@ -420,6 +428,9 @@ func (m *Model) renderField(i int, f field) string {
 }
 
 func (m *Model) logf(format string, args ...interface{}) {
+	if !m.showLogs {
+		return
+	}
 	m.logs = append(m.logs, fmt.Sprintf(format, args...))
 }
 

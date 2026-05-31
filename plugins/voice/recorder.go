@@ -2,9 +2,10 @@ package voice
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
-	"os/exec"
+	"os"
 	"sync"
 )
 
@@ -14,8 +15,9 @@ type Recorder struct {
 	device   string
 	gain     int
 	mu       sync.Mutex
-	cmd      *exec.Cmd
+	readMu   sync.Mutex
 	stdout   io.ReadCloser
+	stopFunc func() error
 	drainBuf bytes.Buffer
 	started  bool
 	backend  string
@@ -45,25 +47,12 @@ func (r *Recorder) Start() error {
 		return nil
 	}
 
-	cmd, name, err := pickCommandWithDevice(r.device)
+	stdout, name, stopFunc, err := startCaptureWithDevice(r.logger, r.device)
 	if err != nil {
 		return err
 	}
-
-	r.stdout, err = cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	// Capture stderr for debugging recording failures
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		r.logger.Error("recorder start failed", "backend", name, "error", err, "stderr", stderrBuf.String())
-		return err
-	}
-
-	r.cmd = cmd
+	r.stdout = stdout
+	r.stopFunc = stopFunc
 	r.started = true
 	r.backend = name
 	r.logger.Info("recording started", "backend", name)
@@ -71,6 +60,9 @@ func (r *Recorder) Start() error {
 }
 
 func (r *Recorder) Read(p []byte) (int, error) {
+	r.readMu.Lock()
+	defer r.readMu.Unlock()
+
 	r.mu.Lock()
 	if r.drainBuf.Len() > 0 {
 		n, _ := r.drainBuf.Read(p)
@@ -88,28 +80,38 @@ func (r *Recorder) Read(p []byte) (int, error) {
 	if n > 0 && r.gain > 1 {
 		applyGain(p[:n], r.gain)
 	}
+	if errors.Is(err, os.ErrClosed) {
+		err = io.EOF
+	}
 	return n, err
 }
 
 func (r *Recorder) Stop() ([]byte, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if !r.started {
+		r.mu.Unlock()
 		return nil, nil
 	}
 	r.started = false
+	stopFunc := r.stopFunc
+	stdout := r.stdout
+	r.stopFunc = nil
+	r.stdout = nil
+	r.mu.Unlock()
 
-	if r.cmd != nil && r.cmd.Process != nil {
-		r.cmd.Process.Kill()
-		r.cmd.Wait()
-		r.cmd = nil
+	if stopFunc != nil {
+		_ = stopFunc()
 	}
 
-	if r.stdout != nil {
+	r.readMu.Lock()
+	defer r.readMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if stdout != nil {
 		buf := make([]byte, 640)
 		for {
-			n, err := r.stdout.Read(buf)
+			n, err := stdout.Read(buf)
 			if n > 0 {
 				applyGain(buf[:n], r.gain)
 				r.drainBuf.Write(buf[:n])
@@ -118,7 +120,6 @@ func (r *Recorder) Stop() ([]byte, error) {
 				break
 			}
 		}
-		r.stdout = nil
 	}
 
 	remaining := r.drainBuf.Bytes()
@@ -140,20 +141,4 @@ func applyGain(pcm []byte, gain int) {
 		pcm[i] = byte(s32)
 		pcm[i+1] = byte(s32 >> 8)
 	}
-}
-
-// ---- Platform-specific (in recorder_*.go) ----
-
-type candidate struct {
-	name string
-	args []string
-}
-
-func firstFound(candidates []candidate) (*exec.Cmd, string, error) {
-	for _, c := range candidates {
-		if path, err := exec.LookPath(c.name); err == nil {
-			return exec.Command(path, c.args...), c.name, nil
-		}
-	}
-	return nil, "", errNoBackend(candidates)
 }

@@ -1,11 +1,11 @@
-//go:build darwin
+//go:build darwin && cgo
 
 package autotype
 
-// #cgo LDFLAGS: -framework Carbon -framework ApplicationServices
+// #cgo LDFLAGS: -framework ApplicationServices
 //
 // #include <ApplicationServices/ApplicationServices.h>
-// #include <Carbon/Carbon.h>
+// #include <unistd.h>
 //
 // static void cgevent_cmd_v(void) {
 // 	CGEventRef cmdDown = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)55, true);  // kVK_Command
@@ -27,6 +27,31 @@ package autotype
 // 	CFRelease(cmdDown); CFRelease(vDown); CFRelease(vUp); CFRelease(cmdUp);
 // }
 import "C"
+
+import (
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/c/just-talk-go/internal/clipboard"
+)
+
+func pastePlatform(text string, logger *slog.Logger) error {
+	cb, err := clipboard.New()
+	if err != nil {
+		return fmt.Errorf("clipboard: %w", err)
+	}
+	if err := cb.Set(text); err != nil {
+		return fmt.Errorf("set clipboard: %w", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if err := simulatePaste(); err != nil {
+		return fmt.Errorf("simulate paste: %w", err)
+	}
+	logger.Debug("autotype done", "text_len", len(text), "method", pasteMethod())
+	return nil
+}
 
 func simulatePaste() error {
 	C.cgevent_cmd_v()

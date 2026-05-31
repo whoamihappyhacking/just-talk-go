@@ -2,16 +2,16 @@
 
 package hotkey
 
-// #cgo LDFLAGS: -framework Carbon -framework ApplicationServices
+// #cgo LDFLAGS: -framework ApplicationServices
 //
 // #include <ApplicationServices/ApplicationServices.h>
-// #include <Carbon/Carbon.h>
 // #include <pthread.h>
 // #include <unistd.h>
 // #include <string.h>
 // #include <stdlib.h>
+// #include <stddef.h>
 //
-// // ---- Pipe-based event bridge (shared by CGEventTap and Carbon) ----
+// // ---- Pipe-based event bridge ----
 // static int bridge_fd = -1;
 // static pthread_mutex_t bridge_mutex = PTHREAD_MUTEX_INITIALIZER;
 //
@@ -19,16 +19,19 @@ package hotkey
 // 	BRIDGE_KEY_DOWN       = 0,
 // 	BRIDGE_KEY_UP         = 1,
 // 	BRIDGE_FLAGS_CHANGED  = 2,
-// 	BRIDGE_CARBON_HOTKEY  = 3,
 // } bridge_event_type_t;
 //
 // typedef struct {
-// 	uint16_t keycode;     // macOS keycode for keyboard events, 0 for carbon
-// 	uint64_t flags;       // CGEventFlags for keyboard events
+// 	uint16_t keycode;     // macOS keycode for keyboard events
+// 	uint64_t flags;       // CGEventFlags
 // 	uint8_t  event_type;  // bridge_event_type_t
-// 	uint32_t carbon_id;   // hotkey ID for carbon events
 // 	int64_t  time_ms;
 // } bridge_event_t;
+//
+// static const int bridge_keycode_offset = offsetof(bridge_event_t, keycode);
+// static const int bridge_flags_offset = offsetof(bridge_event_t, flags);
+// static const int bridge_event_type_offset = offsetof(bridge_event_t, event_type);
+// static const int bridge_time_ms_offset = offsetof(bridge_event_t, time_ms);
 //
 // static void bridge_init(int fd) {
 // 	bridge_fd = fd;
@@ -71,47 +74,8 @@ package hotkey
 // 		kCGEventTapOptionDefault, mask, cg_event_cb, NULL);
 // }
 //
-// // ---- Carbon hotkey support ----
-// #define MAX_CARBON_HOTKEYS 128
-// static EventHotKeyRef carbon_refs[MAX_CARBON_HOTKEYS];
-// static int carbon_count = 0;
-//
-// static OSStatus carbon_hotkey_cb(EventHandlerCallRef caller, EventRef event, void *userData) {
-// 	EventHotKeyID hotkeyID;
-// 	OSStatus err = GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID,
-// 		NULL, sizeof(hotkeyID), NULL, &hotkeyID);
-// 	if (err == noErr) {
-// 		bridge_event_t evt;
-// 		memset(&evt, 0, sizeof(evt));
-// 		evt.event_type = BRIDGE_CARBON_HOTKEY;
-// 		evt.carbon_id  = hotkeyID.id;
-// 		evt.time_ms    = (int64_t)(CFAbsoluteTimeGetCurrent() * 1000.0);
-// 		bridge_send(&evt);
-// 	}
-// 	return noErr;
-// }
-//
-// static int darwin_register_carbon(uint32_t keycode, uint32_t mods, uint32_t id) {
-// 	if (carbon_count >= MAX_CARBON_HOTKEYS) return -1;
-// 	EventHotKeyRef ref = NULL;
-// 	EventHotKeyID hid = {'j', id};
-// 	OSStatus err = RegisterEventHotKey(keycode, mods, hid,
-// 		GetApplicationEventTarget(), 0, &ref);
-// 	if (err != noErr) return -1;
-// 	carbon_refs[carbon_count++] = ref;
-// 	return carbon_count - 1;
-// }
-//
-// static void darwin_unregister_carbon(int idx) {
-// 	if (idx < 0 || idx >= carbon_count) return;
-// 	UnregisterEventHotKey(carbon_refs[idx]);
-// 	carbon_refs[idx] = NULL;
-// }
-//
-// static OSStatus darwin_install_carbon_handler(void) {
-// 	EventTypeSpec spec = {kEventClassKeyboard, kEventHotKeyPressed};
-// 	return InstallEventHandler(GetApplicationEventTarget(),
-// 		NewEventHandlerUPP(carbon_hotkey_cb), 1, &spec, NULL, NULL);
+// static void darwin_enable_tap(CFMachPortRef tap, int enabled) {
+// 	CGEventTapEnable(tap, enabled ? true : false);
 // }
 //
 // // ---- Accessibility ----
@@ -139,7 +103,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 )
 
 // macOS keycode → unified KeyCode (subset).
@@ -155,8 +118,8 @@ var darwinKeyToUnified = map[uint16]KeyCode{
 	0x1D: Key0, 0x12: Key1, 0x13: Key2, 0x14: Key3, 0x15: Key4,
 	0x17: Key5, 0x16: Key6, 0x1A: Key7, 0x1C: Key8, 0x19: Key9,
 
-	0x3B:  KeyCtrl,  0x3A: KeyAlt, 0x38: KeyShift, 0x37: KeySuper,
-	0x3E:  KeyCtrl,  0x3D: KeyAlt, 0x3C: KeyShift, 0x36: KeySuper,
+	0x3B: KeyCtrl, 0x3A: KeyAlt, 0x38: KeyShift, 0x37: KeySuper,
+	0x3E: KeyCtrl, 0x3D: KeyAlt, 0x3C: KeyShift, 0x36: KeySuper,
 
 	0x7A: KeyF1, 0x78: KeyF2, 0x63: KeyF3, 0x76: KeyF4,
 	0x60: KeyF5, 0x61: KeyF6, 0x62: KeyF7, 0x64: KeyF8,
@@ -194,10 +157,11 @@ func darwinFlagsToMods(flags C.uint64_t) Modifier {
 }
 
 type darwinProvider struct {
-	mu       sync.Mutex
-	channels map[Combo]chan<- Event
-	tracker  *KeyStateTracker
-	stopped  bool
+	mu                   sync.Mutex
+	channels             map[Combo]chan<- Event
+	tracker              *KeyStateTracker
+	activeModifierCombos map[Combo]bool
+	stopped              bool
 
 	// Pipe for C→Go event bridge
 	pipeFd int
@@ -206,10 +170,7 @@ type darwinProvider struct {
 	// CGEventTap
 	tap       C.CFMachPortRef
 	tapSource C.CFRunLoopSourceRef
-
-	// Carbon fallback
-	carbonIDs map[uint32]Combo // hotkey ID → combo mapping
-	useCarbon bool
+	runLoop   C.CFRunLoopRef
 
 	logger *slog.Logger
 }
@@ -219,20 +180,18 @@ func NewProvider() (Provider, error) {
 	logger := slog.Default().With("platform", "darwin")
 
 	p := &darwinProvider{
-		channels:  make(map[Combo]chan<- Event),
-		tracker:   NewKeyStateTracker(),
-		carbonIDs: make(map[uint32]Combo),
-		evtBuf:    make([]byte, C.sizeof_bridge_event_t),
-		logger:    logger,
+		channels:             make(map[Combo]chan<- Event),
+		tracker:              NewKeyStateTracker(),
+		activeModifierCombos: make(map[Combo]bool),
+		evtBuf:               make([]byte, C.sizeof_bridge_event_t),
+		logger:               logger,
 	}
 
-	if bool(C.darwin_check_accessibility()) {
-		logger.Info("accessibility permission granted, using CGEventTap")
-	} else {
-		logger.Warn("no accessibility permission, falling back to Carbon")
+	if !bool(C.darwin_check_accessibility()) {
 		C.darwin_request_accessibility()
-		p.useCarbon = true
+		return nil, fmt.Errorf("macOS Accessibility permission is required for global hotkeys")
 	}
+	logger.Info("accessibility permission granted, using CGEventTap")
 
 	return p, nil
 }
@@ -250,41 +209,13 @@ func (p *darwinProvider) Register(combo Combo) (<-chan Event, error) {
 
 	ch := make(chan Event, 32)
 	p.channels[combo] = ch
-
-	if p.useCarbon {
-		if err := p.registerCarbon(combo); err != nil {
-			delete(p.channels, combo)
-			return nil, err
-		}
+	if combo.IsModifierOnly() {
+		p.activeModifierCombos[combo] = false
 	} else {
 		p.tracker.Watch(combo, ch)
 	}
 
 	return ch, nil
-}
-
-func (p *darwinProvider) registerCarbon(combo Combo) error {
-	if combo.IsModifierOnly() {
-		p.logger.Warn("carbon does not support modifier-only", "combo", combo)
-		return nil // accepted, won't fire
-	}
-
-	kvk := unifiedToDarwinKeyCode(combo.Key)
-	if kvk == 0xFFFF {
-		return fmt.Errorf("unsupported key: %s", combo.Key)
-	}
-
-	mods := modsToCarbonMods(combo.Mods)
-	id := uint32(len(p.carbonIDs) + 1)
-	p.carbonIDs[id] = combo
-
-	rc := C.darwin_register_carbon(C.uint32_t(kvk), C.uint32_t(mods), C.uint32_t(id))
-	if rc < 0 {
-		delete(p.carbonIDs, id)
-		return fmt.Errorf("RegisterEventHotKey failed for %s", combo)
-	}
-
-	return nil
 }
 
 func (p *darwinProvider) Unregister(combo Combo) error {
@@ -296,18 +227,8 @@ func (p *darwinProvider) Unregister(combo Combo) error {
 		return fmt.Errorf("hotkey %s not registered", combo)
 	}
 
-	if p.useCarbon {
-		for id, c := range p.carbonIDs {
-			if c == combo {
-				C.darwin_unregister_carbon(C.int(id - 1))
-				delete(p.carbonIDs, id)
-				break
-			}
-		}
-	} else {
-		p.tracker.Unwatch(combo)
-	}
-
+	p.tracker.Unwatch(combo)
+	delete(p.activeModifierCombos, combo)
 	close(ch)
 	delete(p.channels, combo)
 	return nil
@@ -328,66 +249,50 @@ func (p *darwinProvider) Start(ctx context.Context) error {
 	// Start Go-side reader
 	go p.readPipe(ctx)
 
-	if p.useCarbon {
-		return p.runCarbonLoop(ctx)
-	}
 	return p.runCGEventTap(ctx)
 }
 
 func (p *darwinProvider) runCGEventTap(ctx context.Context) error {
 	p.tap = C.darwin_create_tap()
-	if p.tap == nil {
+	if p.tap == 0 {
 		return fmt.Errorf("CGEventTapCreate failed — check accessibility permission")
 	}
 
 	p.tapSource = C.CFMachPortCreateRunLoopSource(
 		C.kCFAllocatorDefault, p.tap, 0,
 	)
-	if p.tapSource == nil {
+	if p.tapSource == 0 {
 		C.CFMachPortInvalidate(p.tap)
 		C.CFRelease(C.CFTypeRef(p.tap))
 		return fmt.Errorf("CFMachPortCreateRunLoopSource failed")
 	}
 
 	C.CFRunLoopAddSource(C.CFRunLoopGetCurrent(), p.tapSource, C.kCFRunLoopCommonModes)
-	C.CGEventTapEnable(p.tap, C.true)
+	p.runLoop = C.CFRunLoopGetCurrent()
+	C.darwin_enable_tap(p.tap, 1)
 
 	p.logger.Info("CGEventTap running")
 
 	// Stop run loop when context is cancelled
 	go func() {
 		<-ctx.Done()
-		C.CFRunLoopStop(C.CFRunLoopGetCurrent())
+		if p.runLoop != 0 {
+			C.CFRunLoopStop(p.runLoop)
+			C.CFRunLoopWakeUp(p.runLoop)
+		}
 	}()
 
 	C.CFRunLoopRun()
 
 	// Cleanup
-	C.CGEventTapEnable(p.tap, C.false)
+	C.darwin_enable_tap(p.tap, 0)
 	C.CFRunLoopRemoveSource(C.CFRunLoopGetCurrent(), p.tapSource, C.kCFRunLoopCommonModes)
 	C.CFRelease(C.CFTypeRef(p.tapSource))
 	C.CFMachPortInvalidate(p.tap)
 	C.CFRelease(C.CFTypeRef(p.tap))
-	syscall.Close(C.int(p.pipeFd))
+	syscall.Close(p.pipeFd)
+	p.runLoop = 0
 
-	return ctx.Err()
-}
-
-func (p *darwinProvider) runCarbonLoop(ctx context.Context) error {
-	if err := C.darwin_install_carbon_handler(); err != C.noErr {
-		return fmt.Errorf("InstallEventHandler failed: %d", int(err))
-	}
-
-	p.logger.Info("Carbon event loop running")
-
-	go func() {
-		<-ctx.Done()
-		C.CFRunLoopStop(C.CFRunLoopGetCurrent())
-	}()
-
-	C.CFRunLoopRun()
-
-	syscall.Close(C.int(p.pipeFd))
 	return ctx.Err()
 }
 
@@ -404,37 +309,32 @@ func (p *darwinProvider) Stop() error {
 	for c, ch := range p.channels {
 		close(ch)
 		delete(p.channels, c)
-		if !p.useCarbon {
-			p.tracker.Unwatch(c)
-		}
+		p.tracker.Unwatch(c)
+		delete(p.activeModifierCombos, c)
 	}
 
 	// Stop run loop
-	C.CFRunLoopStop(C.CFRunLoopGetCurrent())
+	if p.runLoop != 0 {
+		C.CFRunLoopStop(p.runLoop)
+		C.CFRunLoopWakeUp(p.runLoop)
+	}
 
 	return nil
 }
 
 func (p *darwinProvider) Info() ProviderInfo {
-	backend := "CGEventTap"
-	if p.useCarbon {
-		backend = "Carbon"
-	}
-	features := []string{FeatureCombo, FeatureFunctionKey}
-	if !p.useCarbon {
-		features = append(features,
-			FeatureKeyDown, FeatureKeyUp, FeatureKeyPress,
-			FeatureModifierOnly, FeatureSuppressEvent,
-		)
-	}
 	return ProviderInfo{
 		Platform: "darwin",
-		Backend:  backend,
-		Features: features,
+		Backend:  "CGEventTap",
+		Features: []string{
+			FeatureCombo, FeatureFunctionKey,
+			FeatureKeyDown, FeatureKeyUp, FeatureKeyPress,
+			FeatureModifierOnly, FeatureSuppressEvent,
+		},
 	}
 }
 
-// ---- Pipe reader (shared by CGEventTap and Carbon) ----
+// ---- Pipe reader ----
 
 func (p *darwinProvider) readPipe(ctx context.Context) {
 	for {
@@ -454,52 +354,20 @@ func (p *darwinProvider) readPipe(ctx context.Context) {
 			continue
 		}
 
-		evtType := p.evtBuf[18] // offset of event_type in bridge_event_t
-
-		if evtType == C.BRIDGE_CARBON_HOTKEY {
-			p.handleCarbonEvent()
-		} else {
-			p.handleCGEvent()
-		}
-	}
-}
-
-func (p *darwinProvider) handleCarbonEvent() {
-	// Read carbon_id from the buffer
-	carbonID := binary.LittleEndian.Uint32(p.evtBuf[19:23])
-
-	p.mu.Lock()
-	combo, ok := p.carbonIDs[carbonID]
-	var ch chan<- Event
-	if ok {
-		// Re-lookup channel — use a two-step check
-		ch = p.channels[combo]
-	}
-	p.mu.Unlock()
-
-	if ch != nil {
-		evt := Event{
-			Combo: combo,
-			Type:  KeyPress,
-			Time:  time.Now(),
-		}
-		select {
-		case ch <- evt:
-		default:
-		}
+		p.handleCGEvent()
 	}
 }
 
 func (p *darwinProvider) handleCGEvent() {
-	keycode := binary.LittleEndian.Uint16(p.evtBuf[0:2])
-	flags := binary.LittleEndian.Uint64(p.evtBuf[2:10])
-	evtType := p.evtBuf[18]
-	timeMs := int64(binary.LittleEndian.Uint64(p.evtBuf[24:32]))
+	keycodeOff := int(C.bridge_keycode_offset)
+	flagsOff := int(C.bridge_flags_offset)
+	evtTypeOff := int(C.bridge_event_type_offset)
+	timeMsOff := int(C.bridge_time_ms_offset)
 
-	key := darwinKeyToUnified[keycode]
-	if key == KeyNone {
-		return
-	}
+	keycode := binary.LittleEndian.Uint16(p.evtBuf[keycodeOff : keycodeOff+2])
+	flags := binary.LittleEndian.Uint64(p.evtBuf[flagsOff : flagsOff+8])
+	evtType := p.evtBuf[evtTypeOff]
+	timeMs := int64(binary.LittleEndian.Uint64(p.evtBuf[timeMsOff : timeMsOff+8]))
 
 	mods := darwinFlagsToMods(C.uint64_t(flags))
 	now := time.UnixMilli(timeMs)
@@ -507,10 +375,19 @@ func (p *darwinProvider) handleCGEvent() {
 	var events []Event
 	switch evtType {
 	case C.BRIDGE_KEY_DOWN:
+		key := darwinKeyToUnified[keycode]
+		if key == KeyNone {
+			return
+		}
 		events = p.tracker.KeyDown(key, now)
 	case C.BRIDGE_KEY_UP:
+		key := darwinKeyToUnified[keycode]
+		if key == KeyNone {
+			return
+		}
 		events = p.tracker.KeyUp(key, now)
 	case C.BRIDGE_FLAGS_CHANGED:
+		key := darwinKeyToUnified[keycode]
 		events = p.processFlagsChanged(key, mods, now)
 	}
 
@@ -527,12 +404,25 @@ func (p *darwinProvider) handleCGEvent() {
 }
 
 func (p *darwinProvider) processFlagsChanged(key KeyCode, mods Modifier, now time.Time) []Event {
-	// Modifier pressed if its bit is set
 	var events []Event
-	if mods&KeyCodeToModifier(key) != 0 {
-		events = append(events, p.tracker.KeyDown(key, now)...)
-	} else {
-		events = append(events, p.tracker.KeyUp(key, now)...)
+	if key != KeyNone {
+		// Keep the generic tracker state current for regular modifier+key combos.
+		if mods&KeyCodeToModifier(key) != 0 {
+			events = append(events, p.tracker.KeyDown(key, now)...)
+		} else {
+			events = append(events, p.tracker.KeyUp(key, now)...)
+		}
+	}
+	for combo, active := range p.activeModifierCombos {
+		nowActive := mods&combo.Mods == combo.Mods
+		switch {
+		case nowActive && !active:
+			p.activeModifierCombos[combo] = true
+			events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
+		case !nowActive && active:
+			p.activeModifierCombos[combo] = false
+			events = append(events, Event{Combo: combo, Type: KeyUp, Time: now})
+		}
 	}
 	return events
 }
@@ -546,21 +436,4 @@ func unifiedToDarwinKeyCode(k KeyCode) uint16 {
 		}
 	}
 	return 0xFFFF
-}
-
-func modsToCarbonMods(mods Modifier) C.uint32_t {
-	var cm C.uint32_t
-	if mods&ModCtrl != 0 {
-		cm |= C.uint32_t(C.controlKey)
-	}
-	if mods&ModAlt != 0 {
-		cm |= C.uint32_t(C.optionKey)
-	}
-	if mods&ModShift != 0 {
-		cm |= C.uint32_t(C.shiftKey)
-	}
-	if mods&ModSuper != 0 {
-		cm |= C.uint32_t(C.cmdKey)
-	}
-	return cm
 }

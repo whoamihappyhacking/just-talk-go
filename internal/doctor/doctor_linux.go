@@ -5,7 +5,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -150,31 +149,6 @@ func inputAccessCheck() Check {
 		Detail:   "无法读取 /dev/input/event*；" + groupDetail,
 		Fix:      "把当前用户加入 input 组：sudo usermod -aG input $USER，然后重新登录。",
 	}
-}
-
-func commandAllCheck(name string, severity Severity, commands []string, fix string) Check {
-	var missing []string
-	var found []string
-	for _, cmd := range commands {
-		if path, err := exec.LookPath(cmd); err == nil {
-			found = append(found, cmd+"="+path)
-		} else {
-			missing = append(missing, cmd)
-		}
-	}
-	if len(missing) > 0 {
-		return Check{Name: name, OK: false, Severity: severity, Detail: "缺少 " + strings.Join(missing, ", "), Fix: fix}
-	}
-	return Check{Name: name, OK: true, Severity: severity, Detail: strings.Join(found, " / ")}
-}
-
-func commandAnyCheck(name string, severity Severity, commands []string, fix string) Check {
-	for _, cmd := range commands {
-		if path, err := exec.LookPath(cmd); err == nil {
-			return Check{Name: name, OK: true, Severity: severity, Detail: cmd + "=" + path}
-		}
-	}
-	return Check{Name: name, OK: false, Severity: severity, Detail: "缺少 " + strings.Join(commands, ", "), Fix: fix}
 }
 
 func envDetail(names ...string) string {

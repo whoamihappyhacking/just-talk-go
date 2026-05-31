@@ -27,7 +27,17 @@ func main() {
 	useTUI := flag.Bool("tui", true, "run with terminal UI")
 	noTUI := flag.Bool("no-tui", false, "run without terminal UI")
 	doctorOnly := flag.Bool("doctor", false, "run startup doctor and exit")
+	overlayHelper := flag.Bool("overlay-helper", false, "run macOS overlay helper")
+	overlayPosition := flag.String("overlay-position", "top-right", "overlay helper position")
+	overlayScale := flag.Float64("overlay-scale", 1.0, "overlay helper scale")
 	flag.Parse()
+	if *overlayHelper {
+		if err := overlay.RunHelper(*overlayPosition, *overlayScale, os.Stdin); err != nil {
+			fmt.Fprintf(os.Stderr, "overlay helper error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *noTUI {
 		*useTUI = false
 	}
@@ -55,6 +65,7 @@ func main() {
 		}
 	}
 	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -88,15 +99,11 @@ func main() {
 
 	eng := engine.New(provider, cfg, logger)
 
-	if *debug && cfg.Debug.Enabled {
+	if *debug && cfg.Debug.Enabled && !*useTUI {
 		eng.LoadPlugin(plugins.NewDebugPlugin())
 	}
-	if cfg.Voice.Enabled {
-		eng.LoadPlugin(voice.NewVoicePlugin())
-	}
-	if cfg.Voice.Enabled && cfg.Overlay.Enabled {
-		eng.LoadPlugin(overlay.NewOverlayPlugin())
-	}
+	eng.LoadPlugin(voice.NewVoicePlugin())
+	eng.LoadPlugin(overlay.NewOverlayPlugin())
 	if p := config.FindConfig(); p != "" {
 		eng.WatchConfig(p)
 	}
@@ -118,7 +125,7 @@ func runDaemon(eng *engine.Engine) {
 
 func runTUI(eng *engine.Engine, cfg *config.Config, debug bool) {
 	voice.SetupTUILog()
-	// voice output goes to TUI log
+	voice.SetOutput(io.Discard)
 	model := tui.New(cfg)
 	model.SetDebug(debug)
 	model.OnSave = func(c *config.Config) error { return eng.ReloadConfig(c) }

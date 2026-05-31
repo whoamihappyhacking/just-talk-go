@@ -3,33 +3,37 @@ package clipboard
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
 // Clipboard provides Get/Set operations on the system clipboard.
 type Clipboard struct {
-	getCmd        []string
-	setCmd        []string
-	setPrimaryCmd []string // X11 primary selection, nil if unsupported
+	getCmd         []string
+	setCmd         []string
+	setPrimaryCmd  []string // X11 primary selection, nil if unsupported
+	getFunc        func() (string, error)
+	setFunc        func(string) error
+	setPrimaryFunc func(string) error
 }
 
 // New creates a platform-specific Clipboard.
 func New() (*Clipboard, error) {
-	cmd, err := detectCommand()
-	if err != nil {
-		return nil, err
-	}
-	return newFromCmd(cmd), nil
+	return newPlatformClipboard()
 }
 
 // Get reads the current clipboard content.
 func (c *Clipboard) Get() (string, error) {
+	if c.getFunc != nil {
+		return c.getFunc()
+	}
 	return runCmd(c.getCmd)
 }
 
 // Set writes text to the clipboard.
 func (c *Clipboard) Set(text string) error {
+	if c.setFunc != nil {
+		return c.setFunc(text)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, err := runCmdWithInput(ctx, c.setCmd, text)
@@ -38,6 +42,9 @@ func (c *Clipboard) Set(text string) error {
 
 // SetPrimary writes text to the X11 primary selection (if supported).
 func (c *Clipboard) SetPrimary(text string) error {
+	if c.setPrimaryFunc != nil {
+		return c.setPrimaryFunc(text)
+	}
 	if c.setPrimaryCmd == nil {
 		return nil // not supported on this platform
 	}
@@ -51,17 +58,6 @@ type clipCmd struct {
 	get        []string
 	set        []string
 	setPrimary []string
-}
-
-// detectCommand returns the best available clipboard command for this platform.
-func detectCommand() (clipCmd, error) {
-	for _, c := range candidates() {
-		if path, err := lookPath(c.get[0]); err == nil {
-			_ = path
-			return c, nil
-		}
-	}
-	return clipCmd{}, fmt.Errorf("no clipboard tool found")
 }
 
 // NewFromCmd creates a Clipboard from explicit commands (for testing).

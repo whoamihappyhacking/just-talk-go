@@ -10,6 +10,8 @@ All notable project changes are tracked here.
 - Added TUI help toggle with `h`.
 - Improved Wayland clipboard and auto-submit behavior with `wl-copy` and `wtype`.
 - Added Linux recording status overlay for X11 and Wayland.
+- Added macOS support for global hotkeys, native recording, clipboard, auto-submit, recording status overlay, and environment checks.
+- Removed non-cgo macOS fallback builds; Just Talk now requires cgo for native platform integration.
 - Improved toggle and hold hotkey behavior for fast repeated key presses.
 
 ## 2026-05-30

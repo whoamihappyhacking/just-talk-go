@@ -25,6 +25,8 @@ const defaultStopDelayMs = 800
 var TUILog func(string)
 var TUILogBuf []string
 var tuilogMu sync.Mutex
+var outputMu sync.Mutex
+var outputWriter io.Writer = os.Stdout
 var tuiStatus = TUIVoiceStatus{State: "idle", UpdatedAt: time.Now()}
 var tuiStatusMu sync.Mutex
 var tuiStats TUIVoiceStats
@@ -62,7 +64,17 @@ func pout(format string, args ...interface{}) {
 		TUILog(msg)
 		return
 	}
-	fmt.Print(msg)
+	outputMu.Lock()
+	defer outputMu.Unlock()
+	if outputWriter != nil {
+		fmt.Fprint(outputWriter, msg)
+	}
+}
+
+func SetOutput(w io.Writer) {
+	outputMu.Lock()
+	outputWriter = w
+	outputMu.Unlock()
 }
 
 func SetupTUILog() {
@@ -74,6 +86,13 @@ func SetupTUILog() {
 		}
 		tuilogMu.Unlock()
 	}
+}
+
+func DisableTUILog() {
+	tuilogMu.Lock()
+	TUILog = nil
+	TUILogBuf = nil
+	tuilogMu.Unlock()
 }
 
 func TUIStats() TUIVoiceStats {
@@ -271,6 +290,14 @@ func (p *VoicePlugin) OnConfigReload(cfg *config.Config) error { return p.regist
 func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 	vc := cfg.Voice
 	if !vc.Enabled {
+		p.mu.Lock()
+		oldCombo := p.combo
+		p.combo = hotkey.Combo{}
+		p.mu.Unlock()
+		if oldCombo.Key != hotkey.KeyNone || oldCombo.Mods != hotkey.ModNone {
+			p.env.UnregisterHotkey(oldCombo)
+		}
+		p.logger.Info("voice disabled")
 		return nil
 	}
 	combo, err := config.ParseHotkey(vc.PushToTalk)

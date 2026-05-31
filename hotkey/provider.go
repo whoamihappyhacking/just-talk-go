@@ -17,7 +17,7 @@ const (
 //
 // Each platform has its own implementation:
 //   - Windows:  RegisterHotKey + SetWindowsHookEx
-//   - macOS:    CGEventTap (primary) + Carbon RegisterEventHotKey (fallback)
+//   - macOS:    CGEventTap
 //   - Linux X11: XGrabKey + X event loop
 //   - Linux Wayland: evdev (/dev/input/event*) or XDG Desktop Portal
 //
@@ -53,7 +53,7 @@ type Provider interface {
 // ProviderInfo describes a provider implementation.
 type ProviderInfo struct {
 	Platform string   // "x11", "wayland", "darwin", "windows", "mock"
-	Backend  string   // "CGEventTap", "Carbon", "XGrabKey", "evdev", "RegisterHotKey", "mock"
+	Backend  string   // "CGEventTap", "XGrabKey", "evdev", "RegisterHotKey", "mock"
 	Features []string // List of supported Feature constants
 }
 

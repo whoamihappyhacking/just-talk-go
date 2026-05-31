@@ -3,6 +3,8 @@
 package autotype
 
 import (
+	"fmt"
+	"log/slog"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -32,6 +34,10 @@ const (
 	inputKeyboard  = 1
 	keyeventfKeyUp = 2
 )
+
+func pastePlatform(text string, logger *slog.Logger) error {
+	return fmt.Errorf("autotype on Windows is not implemented")
+}
 
 func simulatePaste() error {
 	// Simulate Ctrl down → V down → V up → Ctrl up

@@ -299,13 +299,18 @@ func (b *waylandBackend) draw(label string, color statusColor) {
 		}
 	}
 	dotSize := b.scaled(14)
-	dotX := b.scaled(20)
-	dotY := (b.h - dotSize) / 2
-	b.fillCircle(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
+	gap := b.scaled(14)
 	textScale := b.scaled(3)
 	textW := bitmapTextWidth(label, textScale)
+	contentW := dotSize + gap + textW
+	dotX := (b.w - contentW) / 2
+	if dotX < 0 {
+		dotX = 0
+	}
+	dotY := (b.h - dotSize) / 2
+	b.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
 	textH := 7 * textScale
-	textX := dotX + dotSize + b.scaled(14)
+	textX := dotX + dotSize + gap
 	textY := (b.h - textH) / 2
 	if maxX := b.w - b.scaled(14) - textW; textX > maxX {
 		textX = maxX
@@ -329,13 +334,35 @@ func (b *waylandBackend) setPixel(x, y int, c rgba) {
 	b.data[i+3] = c.a
 }
 
-func (b *waylandBackend) fillCircle(cx, cy, r int, c rgba) {
-	rr := r * r
+func (b *waylandBackend) blendPixel(x, y int, c rgba, coverage uint8) {
+	if x < 0 || y < 0 || x >= b.w || y >= b.h || coverage == 0 {
+		return
+	}
+	i := (y*b.w + x) * 4
+	a := uint16(coverage)
+	inv := uint16(255 - coverage)
+	b.data[i+0] = uint8((uint16(c.b)*a + uint16(b.data[i+0])*inv) / 255)
+	b.data[i+1] = uint8((uint16(c.g)*a + uint16(b.data[i+1])*inv) / 255)
+	b.data[i+2] = uint8((uint16(c.r)*a + uint16(b.data[i+2])*inv) / 255)
+	b.data[i+3] = 255
+}
+
+func (b *waylandBackend) fillCircleAA(cx, cy, r int, c rgba) {
+	rr := r * r * 16
 	for y := cy - r; y <= cy+r; y++ {
 		for x := cx - r; x <= cx+r; x++ {
-			dx, dy := x-cx, y-cy
-			if dx*dx+dy*dy <= rr {
-				b.setPixel(x, y, c)
+			inside := 0
+			for sy := 0; sy < 4; sy++ {
+				for sx := 0; sx < 4; sx++ {
+					dx := (x-cx)*4 + sx - 1
+					dy := (y-cy)*4 + sy - 1
+					if dx*dx+dy*dy <= rr {
+						inside++
+					}
+				}
+			}
+			if inside > 0 {
+				b.blendPixel(x, y, c, uint8(inside*255/16))
 			}
 		}
 	}

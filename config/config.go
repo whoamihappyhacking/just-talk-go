@@ -46,11 +46,11 @@ type VoiceConfig struct {
 func Default() *Config {
 	return &Config{
 		Voice: VoiceConfig{
-			Enabled: false, Mode: "toggle", PushToTalk: "Alt+Super",
+			Enabled: true, Mode: "toggle", PushToTalk: "Alt+Super",
 			Language: "zh-CN", AutoSubmit: true, ResourceID: "volc.bigasr.sauc.duration",
 		},
 		Overlay: OverlayConfig{
-			Enabled: true, Position: "top-right", IdleVisible: false, Scale: 1.0,
+			Enabled: true, Position: "bottom-center", IdleVisible: false, Scale: 1.0,
 		},
 	}
 }
@@ -111,7 +111,8 @@ func Save(cfg *Config) error {
 
 var modifierNames = map[string]hotkey.Modifier{
 	"ctrl": hotkey.ModCtrl, "alt": hotkey.ModAlt, "shift": hotkey.ModShift,
-	"super": hotkey.ModSuper, "cmd": hotkey.ModSuper, "win": hotkey.ModSuper,
+	"control": hotkey.ModCtrl, "option": hotkey.ModAlt, "super": hotkey.ModSuper,
+	"cmd": hotkey.ModSuper, "command": hotkey.ModSuper, "win": hotkey.ModSuper,
 }
 
 var keyNameToCode = buildKeyNameMap()
@@ -130,10 +131,13 @@ func buildKeyNameMap() map[string]hotkey.KeyCode {
 		m[i.String()] = i
 	}
 	m["ctrl"] = hotkey.KeyCtrl
+	m["control"] = hotkey.KeyCtrl
 	m["alt"] = hotkey.KeyAlt
+	m["option"] = hotkey.KeyAlt
 	m["shift"] = hotkey.KeyShift
 	m["super"] = hotkey.KeySuper
 	m["cmd"] = hotkey.KeySuper
+	m["command"] = hotkey.KeySuper
 	m["win"] = hotkey.KeySuper
 	for _, k := range []hotkey.KeyCode{
 		hotkey.KeySpace, hotkey.KeyTab, hotkey.KeyEnter, hotkey.KeyEscape,

@@ -95,16 +95,16 @@ func (p *Plugin) sync(status voice.TUIVoiceStatus) {
 func displayForStatus(status voice.TUIVoiceStatus, idleVisible bool) (string, statusColor, bool) {
 	switch status.State {
 	case "connecting":
-		return "CONN", statusColor{R: 245 << 8, G: 190 << 8, B: 70 << 8}, true
+		return "CON", statusColor{R: 245 << 8, G: 190 << 8, B: 70 << 8}, true
 	case "recording":
 		return "REC", statusColor{R: 255 << 8, G: 65 << 8, B: 65 << 8}, true
 	case "stopping_delayed":
-		return "STOP", statusColor{R: 255 << 8, G: 140 << 8, B: 60 << 8}, true
+		return "STP", statusColor{R: 255 << 8, G: 140 << 8, B: 60 << 8}, true
 	case "stopping":
-		return "WAIT", statusColor{R: 255 << 8, G: 160 << 8, B: 70 << 8}, true
+		return "WAI", statusColor{R: 255 << 8, G: 160 << 8, B: 70 << 8}, true
 	case "error":
 		return "ERR", statusColor{R: 255 << 8, G: 65 << 8, B: 65 << 8}, true
 	default:
-		return "IDLE", statusColor{R: 145 << 8, G: 145 << 8, B: 145 << 8}, idleVisible
+		return "IDL", statusColor{R: 145 << 8, G: 145 << 8, B: 145 << 8}, idleVisible
 	}
 }

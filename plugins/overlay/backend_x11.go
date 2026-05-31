@@ -164,19 +164,28 @@ func (b *x11Backend) draw(label string, color statusColor) {
 	bg := b.alloc(20<<8, 20<<8, 20<<8)
 	fg := b.alloc(245<<8, 245<<8, 245<<8)
 	dot := b.alloc(color.R, color.G, color.B)
+	dotEdge := b.alloc((color.R+(20<<8))/2, (color.G+(20<<8))/2, (color.B+(20<<8))/2)
 
 	C.XSetForeground(b.dpy, b.gc, bg)
 	C.XFillRectangle(b.dpy, C.Drawable(b.win), b.gc, 0, 0, C.uint(b.w), C.uint(b.h))
-	C.XSetForeground(b.dpy, b.gc, dot)
 	dotSize := b.scaled(14)
-	dotX := b.scaled(20)
-	dotY := (b.h - dotSize) / 2
-	C.XFillArc(b.dpy, C.Drawable(b.win), b.gc, C.int(dotX), C.int(dotY), C.uint(dotSize), C.uint(dotSize), 0, 360*64)
-	C.XSetForeground(b.dpy, b.gc, fg)
+	gap := b.scaled(14)
 	textScale := b.scaled(3)
 	textW := bitmapTextWidth(label, textScale)
+	contentW := dotSize + gap + textW
+	dotX := (b.w - contentW) / 2
+	if dotX < 0 {
+		dotX = 0
+	}
+	dotY := (b.h - dotSize) / 2
+	C.XSetForeground(b.dpy, b.gc, dotEdge)
+	C.XFillArc(b.dpy, C.Drawable(b.win), b.gc, C.int(dotX), C.int(dotY), C.uint(dotSize), C.uint(dotSize), 0, 360*64)
+	inset := b.scaled(1)
+	C.XSetForeground(b.dpy, b.gc, dot)
+	C.XFillArc(b.dpy, C.Drawable(b.win), b.gc, C.int(dotX+inset), C.int(dotY+inset), C.uint(dotSize-2*inset), C.uint(dotSize-2*inset), 0, 360*64)
+	C.XSetForeground(b.dpy, b.gc, fg)
 	textH := 7 * textScale
-	textX := dotX + dotSize + b.scaled(14)
+	textX := dotX + dotSize + gap
 	textY := (b.h - textH) / 2
 	if maxX := b.w - b.scaled(14) - textW; textX > maxX {
 		textX = maxX
@@ -246,6 +255,7 @@ func bitmapTextWidth(s string, scale int) int {
 }
 
 var glyphs = map[rune][7]byte{
+	'A': {0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001},
 	'C': {0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110},
 	'D': {0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110},
 	'E': {0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111},

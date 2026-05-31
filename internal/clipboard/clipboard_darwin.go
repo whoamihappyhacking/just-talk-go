@@ -1,26 +1,38 @@
-//go:build darwin
+//go:build darwin && cgo
 
 package clipboard
 
+// #cgo LDFLAGS: -framework AppKit -framework Foundation
+// #include <stdlib.h>
+// #include "clipboard_darwin.h"
+import "C"
+
 import (
-	"bytes"
-	"context"
-	"os/exec"
+	"fmt"
+	"unsafe"
 )
 
-func lookPath(name string) (string, error) { return exec.LookPath(name) }
-func runCmd(args []string) (string, error) {
-	out, err := exec.Command(args[0], args[1:]...).Output()
-	return string(bytes.TrimSpace(out)), err
+func newPlatformClipboard() (*Clipboard, error) {
+	return &Clipboard{
+		getFunc: darwinGet,
+		setFunc: darwinSet,
+	}, nil
 }
-func runCmdWithInput(ctx context.Context, args []string, input string) (string, error) {
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Stdin = bytes.NewBufferString(input)
-	out, err := cmd.Output()
-	return string(bytes.TrimSpace(out)), err
-}
-func candidates() []clipCmd {
-	return []clipCmd{
-		{get: []string{"pbpaste"}, set: []string{"pbcopy"}},
+
+func darwinSet(text string) error {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+	if C.jt_clipboard_set(cText) != 0 {
+		return fmt.Errorf("NSPasteboard set failed")
 	}
+	return nil
+}
+
+func darwinGet() (string, error) {
+	cText := C.jt_clipboard_get()
+	if cText == nil {
+		return "", fmt.Errorf("NSPasteboard get failed")
+	}
+	defer C.free(unsafe.Pointer(cText))
+	return C.GoString(cText), nil
 }
