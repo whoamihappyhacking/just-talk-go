@@ -16,6 +16,7 @@ All notable project changes are tracked here.
 - Improved toggle and hold hotkey behavior for fast repeated key presses.
 - Show ASR connection and final-result timeout errors in the status UI/overlay instead of immediately falling back to idle.
 - Added transient `Esc` cancel and `R` retry hotkeys while recording or showing retryable errors.
+- Improved X11 overlay placement on multi-monitor setups and switched X11 rendering to an ARGB window for smoother rounded corners.
 
 ## 2026-05-30
 

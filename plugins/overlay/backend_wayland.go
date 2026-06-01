@@ -433,6 +433,22 @@ func (b *waylandBackend) scaled(v int) int {
 	return n
 }
 
+func insideRoundedRect(x, y, w, h, r int) bool {
+	if x >= r && x < w-r {
+		return true
+	}
+	cx := r
+	if x >= w-r {
+		cx = w - r - 1
+	}
+	cy := r
+	if y >= h/2 {
+		cy = h - r - 1
+	}
+	dx, dy := x-cx, y-cy
+	return dx*dx+dy*dy <= r*r
+}
+
 //export goOverlayRegistryGlobal
 func goOverlayRegistryGlobal(handle C.uintptr_t, registry *C.struct_wl_registry, name C.uint32_t, iface *C.char, version C.uint32_t) {
 	h := cgo.Handle(handle)

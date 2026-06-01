@@ -42,7 +42,7 @@ Linux build dependencies:
 sudo pacman -S --needed go gcc libx11 libxtst libxext wayland
 
 # Debian / Ubuntu
-sudo apt install golang-go build-essential libx11-dev libxtst-dev libxext-dev libwayland-dev
+sudo apt install golang-go build-essential libx11-dev libxtst-dev libxext-dev libxinerama-dev libwayland-dev
 ```
 
 macOS build dependencies:
