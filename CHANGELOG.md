@@ -4,6 +4,7 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- Avoid duplicate auto-submit on KDE Plasma by using uinput directly and not writing the Wayland primary selection there.
 - TUI is now the default startup mode.
 - Added persistent usage statistics for total sessions, recognized characters, average speed, and recent speed.
 - Added configurable ASR hotwords.

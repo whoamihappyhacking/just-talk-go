@@ -260,6 +260,7 @@ type VoicePlugin struct {
 	pendingDone            int
 	finishingSessions      map[uint64]struct{}
 	canceledSessions       map[uint64]struct{}
+	outputSessions         map[uint64]struct{}
 	errorUntil             time.Time
 	errorTimer             *time.Timer
 	lastError              string
@@ -725,7 +726,7 @@ func (p *VoicePlugin) finishRecordingSession(session *recordingSession) {
 				p.publishError("识别超时: 等待 ASR final 超过 15s", session.sessionID)
 			}
 		}
-		if text := session.asrClient.LastText(); text != "" && session.userStopped && !p.sessionCanceled(session.sessionID) {
+		if text := session.asrClient.LastText(); text != "" && session.userStopped && p.claimSessionOutput(session.sessionID) {
 			audioDuration := time.Duration(0)
 			if !session.startedAt.IsZero() {
 				audioDuration = time.Since(session.startedAt)
@@ -788,6 +789,22 @@ func (p *VoicePlugin) sessionCanceled(sessionID uint64) bool {
 	defer p.mu.Unlock()
 	_, ok := p.canceledSessions[sessionID]
 	return ok
+}
+
+func (p *VoicePlugin) claimSessionOutput(sessionID uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, canceled := p.canceledSessions[sessionID]; canceled {
+		return false
+	}
+	if p.outputSessions == nil {
+		p.outputSessions = make(map[uint64]struct{})
+	}
+	if _, exists := p.outputSessions[sessionID]; exists {
+		return false
+	}
+	p.outputSessions[sessionID] = struct{}{}
+	return true
 }
 
 func (p *VoicePlugin) publishStatusLocked() {

@@ -37,6 +37,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/bendahl/uinput"
@@ -98,8 +99,10 @@ func pasteWayland(text string, logger *slog.Logger) error {
 	if err := pipeToCmd(text, "wl-copy", "--type", "text/plain;charset=utf-8"); err != nil {
 		return fmt.Errorf("set Wayland clipboard: %w", err)
 	}
-	if err := pipeToCmd(text, "wl-copy", "--primary", "--type", "text/plain;charset=utf-8"); err != nil {
-		return fmt.Errorf("set Wayland primary selection: %w", err)
+	if !isKDEPlasma() {
+		if err := pipeToCmd(text, "wl-copy", "--primary", "--type", "text/plain;charset=utf-8"); err != nil {
+			return fmt.Errorf("set Wayland primary selection: %w", err)
+		}
 	}
 
 	time.Sleep(50 * time.Millisecond)
@@ -161,12 +164,19 @@ func simulatePasteX11() error {
 }
 
 func simulatePasteWayland() error {
-	if _, err := exec.LookPath("wtype"); err == nil {
-		if err := exec.Command("wtype", "-M", "shift", "-k", "Insert", "-m", "shift").Run(); err == nil {
-			return nil
+	if !isKDEPlasma() {
+		if _, err := exec.LookPath("wtype"); err == nil {
+			if err := exec.Command("wtype", "-M", "shift", "-k", "Insert", "-m", "shift").Run(); err == nil {
+				return nil
+			}
 		}
 	}
 	return simulatePasteUinput()
+}
+
+func isKDEPlasma() bool {
+	desktop := strings.ToLower(os.Getenv("XDG_CURRENT_DESKTOP") + " " + os.Getenv("DESKTOP_SESSION"))
+	return strings.Contains(desktop, "kde") || strings.Contains(desktop, "plasma") || os.Getenv("KDE_SESSION_VERSION") != ""
 }
 
 func simulatePasteUinput() error {
@@ -197,8 +207,10 @@ func simulatePasteUinput() error {
 
 func pasteMethod() string {
 	if isWaylandSession() {
-		if _, err := exec.LookPath("wtype"); err == nil {
-			return "wayland/wtype+Shift+Insert"
+		if !isKDEPlasma() {
+			if _, err := exec.LookPath("wtype"); err == nil {
+				return "wayland/wtype+Shift+Insert"
+			}
 		}
 		return "wayland/uinput+Shift+Insert"
 	}
