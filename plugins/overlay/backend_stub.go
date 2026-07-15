@@ -1,4 +1,4 @@
-//go:build (!linux && !darwin) || no_x11
+//go:build (!linux && !darwin && !windows) || (linux && no_x11)
 
 package overlay
 

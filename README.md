@@ -16,25 +16,25 @@ Just Talk 是一个面向桌面环境的语音输入工具。它通过全局快�
 - 语音热键限定为适合作为全局快捷键的按键：支持纯修饰键、功能键、Tab、CapsLock、方向键和导航键等；不支持字母、数字、标点、空格等普通字符键。
 - 豆包大模型流式 ASR，支持双向流优化版和二遍识别。
 - 自动复制到剪贴板，支持自动上屏。
-- Wayland / X11 / macOS 顶层录音状态胶囊提示。
+- Wayland / X11 / macOS / Windows 顶层录音状态胶囊提示。
 - TUI 配置界面，支持热键、模式、自动上屏、停止延迟、热词等配置。
 - 热词增强识别，适合项目名、人名、英文术语和专有名词。
 - 录音历史统计，包括历史次数、总字数、平均速度和最近速度。
 
 ## 平台状态
 
-当前开发重点是 Linux 和 macOS 桌面：
+当前支持 Linux、macOS 和 Windows 桌面：
 
 | 平台 | 状态 | 说明 |
 | --- | --- | --- |
 | Linux Wayland | 已支持 | 已支持 Sway / wlroots 场景；快捷键基于 evdev，需要 input 权限 |
 | Linux X11 | 已支持 | 使用 X11 原生全局热键 |
 | macOS | 已支持 | 全局快捷键基于 CGEventTap，录音使用 CoreAudio，剪贴板使用 NSPasteboard，胶囊显示使用 AppKit NSPanel |
-| Windows | 未实现 | 暂不支持 |
+| Windows 10/11 | 已支持 | 全局按键状态监听及低级键盘钩子回退、WinMM 录音、Unicode 剪贴板、SendInput 自动上屏和 Win32 状态胶囊 |
 
 ## 构建
 
-Just Talk 依赖平台原生能力，构建时需要启用 cgo。
+Just Talk 依赖平台原生能力。Linux 和 macOS 构建需要启用 cgo；Windows 使用纯 Go 的 Win32 调用，不需要 cgo。
 
 Linux 构建依赖：
 
@@ -53,11 +53,25 @@ macOS 构建依赖：
 xcode-select --install
 ```
 
+Windows 构建依赖：
+
+```powershell
+# 安装 Go 1.25 或更高版本；不需要额外安装 ffmpeg、SoX 或 C 编译器。
+winget install --id GoLang.Go --exact
+```
+
 构建当前平台二进制：
 
 ```bash
 cd just-talk-go
 CGO_ENABLED=1 go build -o build/just-talk ./cmd/just-talk
+```
+
+Windows PowerShell：
+
+```powershell
+cd just-talk-go
+go build -o build\just-talk.exe .\cmd\just-talk
 ```
 
 安装到 `~/.local/bin/just-talk`：
@@ -71,6 +85,13 @@ make install
 ```
 
 macOS 需要在本机 macOS 上构建；项目不提供非 cgo 版本。
+
+Windows 安装到 `%LOCALAPPDATA%\Programs\Just Talk\just-talk.exe`：
+
+```powershell
+.\build\just-talk.exe --install
+# 如果安装目录尚未在 PATH 中，按命令输出提示添加即可。
+```
 
 ## 使用
 
@@ -93,12 +114,22 @@ just-talk --backend wayland
 just-talk --backend x11
 ```
 
+Windows 不需要指定后端。首次使用前可检查麦克风和配置：
+
+```powershell
+.\build\just-talk.exe --doctor
+```
+
 ## 配置
 
 默认配置路径：
 
 ```text
+# Linux / macOS
 ~/.config/just-talk/config.toml
+
+# Windows
+%APPDATA%\just-talk\config.toml
 ```
 
 推荐热键配置：
@@ -132,6 +163,9 @@ macOS 热键写法：
 # Option 等价于 Alt，Command/Cmd 等价于 Super
 push_to_talk = "Option+Command"
 ```
+
+Windows 使用 `Win` 或 `Super` 表示 Windows 徽标键。如果麦克风不可用，请在“Windows 设置 → 隐私和安全性 → 麦克风”中允许桌面应用访问麦克风。
+
 
 ## 更新日志
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/c/just-talk-go/config"
@@ -29,7 +30,7 @@ func main() {
 	useTUI := flag.Bool("tui", true, "run with terminal UI")
 	noTUI := flag.Bool("no-tui", false, "run without terminal UI")
 	doctorOnly := flag.Bool("doctor", false, "run startup doctor and exit")
-	installOnly := flag.Bool("install", false, "install just-talk to ~/.local/bin")
+	installOnly := flag.Bool("install", false, "install just-talk for the current user")
 	overlayHelper := flag.Bool("overlay-helper", false, "run macOS overlay helper")
 	overlayPosition := flag.String("overlay-position", "top-right", "overlay helper position")
 	overlayScale := flag.Float64("overlay-scale", 1.0, "overlay helper scale")
@@ -58,16 +59,18 @@ func main() {
 	}
 
 	// Daemon mode: log to stderr + file. TUI mode: file only (stderr corrupts display).
+	logPath := defaultLogPath()
+	_ = os.MkdirAll(filepath.Dir(logPath), 0755)
 	var logWriter io.Writer
 	if *useTUI {
-		lf, _ := os.OpenFile("/tmp/just-talk.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		lf, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if lf != nil {
 			logWriter = lf
 		} else {
 			logWriter = io.Discard
 		}
 	} else {
-		lf, _ := os.OpenFile("/tmp/just-talk.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		lf, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if lf != nil {
 			logWriter = io.MultiWriter(os.Stderr, lf)
 		} else {
@@ -165,14 +168,14 @@ func printTroubleshooting(err error) {
 	fmt.Fprintf(os.Stderr, "  X11:      Ensure $DISPLAY is set\n")
 	fmt.Fprintf(os.Stderr, "  Wayland:  Add user to 'input' group\n")
 	fmt.Fprintf(os.Stderr, "  macOS:    Grant Accessibility permission\n")
+	fmt.Fprintf(os.Stderr, "  Windows:  Check microphone privacy settings\n")
 }
 
 func installSelf() error {
-	home, err := os.UserHomeDir()
+	targetDir, err := installDir()
 	if err != nil {
-		return fmt.Errorf("find home directory: %w", err)
+		return err
 	}
-	targetDir := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return fmt.Errorf("create %s: %w", targetDir, err)
 	}
@@ -184,7 +187,11 @@ func installSelf() error {
 	if resolved, err := filepath.EvalSymlinks(src); err == nil {
 		src = resolved
 	}
-	target := filepath.Join(targetDir, "just-talk")
+	name := "just-talk"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	target := filepath.Join(targetDir, name)
 	if samePath(src, target) {
 		fmt.Fprintf(os.Stdout, "just-talk is already installed at %s\n", target)
 		printInstallPathNote(targetDir)
@@ -220,7 +227,7 @@ func installSelf() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary installer file: %w", err)
 	}
-	if err := os.Rename(tmpName, target); err != nil {
+	if err := replaceInstalledFile(tmpName, target); err != nil {
 		return fmt.Errorf("install to %s: %w", target, err)
 	}
 	ok = true
@@ -228,6 +235,59 @@ func installSelf() error {
 	fmt.Fprintf(os.Stdout, "Installed just-talk to %s\n", target)
 	printInstallPathNote(targetDir)
 	return nil
+}
+
+func installDir() (string, error) {
+	if runtime.GOOS == "windows" {
+		base := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if base == "" {
+			var err error
+			base, err = os.UserCacheDir()
+			if err != nil {
+				return "", fmt.Errorf("find local application data directory: %w", err)
+			}
+		}
+		return filepath.Join(base, "Programs", "Just Talk"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("find home directory: %w", err)
+	}
+	return filepath.Join(home, ".local", "bin"), nil
+}
+
+func replaceInstalledFile(source, target string) error {
+	if runtime.GOOS != "windows" {
+		return os.Rename(source, target)
+	}
+	backup := target + ".old"
+	_ = os.Remove(backup)
+	hadTarget := false
+	if _, err := os.Stat(target); err == nil {
+		if err := os.Rename(target, backup); err != nil {
+			return err
+		}
+		hadTarget = true
+	}
+	if err := os.Rename(source, target); err != nil {
+		if hadTarget {
+			_ = os.Rename(backup, target)
+		}
+		return err
+	}
+	if hadTarget {
+		_ = os.Remove(backup)
+	}
+	return nil
+}
+
+func defaultLogPath() string {
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserCacheDir(); err == nil {
+			return filepath.Join(dir, "just-talk", "just-talk.log")
+		}
+	}
+	return "/tmp/just-talk.log"
 }
 
 func samePath(a, b string) bool {
@@ -242,6 +302,9 @@ func samePath(a, b string) bool {
 	if resolved, err := filepath.EvalSymlinks(b); err == nil {
 		b = resolved
 	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
 	return a == b
 }
 
@@ -253,7 +316,7 @@ func printInstallPathNote(dir string) {
 
 func pathContains(dir string) bool {
 	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
-		if p == dir {
+		if samePath(p, dir) {
 			return true
 		}
 		if rel, err := filepath.Rel(p, dir); err == nil && rel == "." {

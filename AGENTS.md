@@ -6,11 +6,11 @@ This file gives coding agents concise guidance for working in this repository.
 
 Just Talk is a desktop voice input tool. It records with a global hotkey, sends audio to streaming ASR, then copies recognized text to the clipboard or submits it into the focused input field.
 
-The current supported desktop targets are Linux and macOS. Windows is not implemented.
+The supported desktop targets are Linux, macOS, and Windows.
 
 ## Build And Test
 
-This project uses native platform APIs and requires cgo for supported desktop builds.
+This project uses native platform APIs. Linux and macOS require cgo; Windows uses direct Win32 calls and builds with `CGO_ENABLED=0`.
 
 ```bash
 make build              # Build for the current platform
@@ -19,6 +19,8 @@ make test               # Run all tests
 go test ./...           # Faster default test command
 go test ./... -tags no_x11
 CGO_ENABLED=1 go build -o build/just-talk ./cmd/just-talk
+go build -o build/just-talk.exe ./cmd/just-talk  # Windows
+JUST_TALK_TEST_WINDOWS_AUDIO=1 go test ./plugins/voice -run TestWindowsRecorderIntegration -v
 ```
 
 Do not add or preserve non-cgo macOS fallback builds. A build that compiles but cannot provide native hotkeys, recording, clipboard, auto-submit, or overlay is worse than an explicit build failure.
@@ -54,6 +56,16 @@ macOS:
 - Users grant Accessibility and Microphone permissions to the terminal app that launches Just Talk, not to a separate `.app` bundle.
 - Full Xcode is not required, but Apple Command Line Tools must provide `clang` and the macOS SDK.
 
+Windows:
+
+- Global hotkeys poll `GetAsyncKeyState` at 5 ms intervals and use `WH_KEYBOARD_LL` as a physical-key fallback. Providers emit state edges without key-repeat events.
+- Recording uses native `winmm` wave input at 16 kHz, 16-bit mono PCM.
+- Clipboard operations use the Win32 Unicode clipboard through the existing clipboard dependency.
+- Auto-submit uses `SendInput` to post Ctrl+V.
+- Overlay uses a no-activate, topmost, click-through Win32 window.
+- Config is stored under `%APPDATA%\just-talk`; logs and stats use `%LOCALAPPDATA%`.
+- No external ffmpeg, SoX, clipboard tool, cgo toolchain, or administrator privilege is required.
+
 ## Architecture
 
 ```text
@@ -71,7 +83,7 @@ Core packages:
 - `hotkey/`: platform global hotkey providers plus shared combo/event types.
 - `engine/`: plugin lifecycle and config reload orchestration.
 - `plugins/voice/`: recorder, ASR streaming, hotkey behavior, clipboard/auto-submit dispatch, stats.
-- `plugins/overlay/`: recording status capsule for Linux and macOS.
+- `plugins/overlay/`: recording status capsule for Linux, macOS, and Windows.
 - `internal/autotype/`: platform paste/auto-submit implementation.
 - `internal/clipboard/`: platform clipboard implementation.
 - `internal/doctor/`: startup environment checks.

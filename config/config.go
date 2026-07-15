@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -78,8 +79,8 @@ func Load(path string) (*Config, error) {
 
 func FindConfig() string {
 	candidates := []string{"./config.toml"}
-	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".config", "just-talk", "config.toml"))
+	if path := DefaultPath(); path != "" {
+		candidates = append(candidates, path)
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		candidates = append(candidates, filepath.Join(xdg, "just-talk", "config.toml"))
@@ -95,9 +96,13 @@ func FindConfig() string {
 func Save(cfg *Config) error {
 	path := FindConfig()
 	if path == "" {
-		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, ".config", "just-talk", "config.toml")
-		os.MkdirAll(filepath.Dir(path), 0755)
+		path = DefaultPath()
+		if path == "" {
+			return fmt.Errorf("cannot determine user config directory")
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return err
+		}
 	}
 	f, err := os.Create(path)
 	if err != nil {
@@ -105,6 +110,19 @@ func Save(cfg *Config) error {
 	}
 	defer f.Close()
 	return toml.NewEncoder(f).Encode(cfg)
+}
+
+// DefaultPath returns the platform-standard per-user configuration path.
+func DefaultPath() string {
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(dir) != "" {
+			return filepath.Join(dir, "just-talk", "config.toml")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config", "just-talk", "config.toml")
+	}
+	return ""
 }
 
 // ---- Hotkey parser ----

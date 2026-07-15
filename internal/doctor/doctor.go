@@ -102,6 +102,8 @@ func platformName(s string) string {
 		return "macOS"
 	case "linux":
 		return "Linux"
+	case "windows":
+		return "Windows"
 	default:
 		return s
 	}

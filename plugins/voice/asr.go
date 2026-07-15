@@ -25,7 +25,7 @@ type ASRClient struct {
 	cfg       ASRConfig
 	logger    *slog.Logger
 	conn      *websocket.Conn
-	connMu    sync.Mutex
+	writeSlot chan struct{}
 	resultCh  chan ASRResult
 	done      chan struct{}
 	final     chan struct{}
@@ -50,12 +50,15 @@ const (
 )
 
 func NewASRClient(cfg ASRConfig, logger *slog.Logger) *ASRClient {
+	writeSlot := make(chan struct{}, 1)
+	writeSlot <- struct{}{}
 	return &ASRClient{
 		cfg: cfg, logger: logger,
-		resultCh: make(chan ASRResult, 64),
-		lastText: "",
-		done:     make(chan struct{}),
-		final:    make(chan struct{}),
+		writeSlot: writeSlot,
+		resultCh:  make(chan ASRResult, 64),
+		lastText:  "",
+		done:      make(chan struct{}),
+		final:     make(chan struct{}),
 	}
 }
 
@@ -88,8 +91,15 @@ func (c *ASRClient) Connect(ctx context.Context) error {
 }
 
 func (c *ASRClient) SendAudio(ctx context.Context, pcm []byte, isLast bool) error {
-	c.connMu.Lock()
-	defer c.connMu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.writeSlot:
+	}
+	defer func() { c.writeSlot <- struct{}{} }()
+	if c.conn == nil {
+		return fmt.Errorf("ASR connection is not open")
+	}
 	flags := byte(0x00)
 	if isLast {
 		flags = 0x02
@@ -203,19 +213,20 @@ func (c *ASRClient) parseResponse(data []byte) {
 		return
 	}
 	text := resp.Result.Text
-	isFinal := flags == 0x02 || flags == 0x03
+	isLastPacket := flags == 0x02 || flags == 0x03
+	isFinalResult := isLastPacket
 	for _, u := range resp.Result.Utterances {
 		if u.Definite {
-			isFinal = true
+			isFinalResult = true
 		}
 	}
 	if text != "" {
 		c.textMu.Lock()
 		c.lastText = text
 		c.textMu.Unlock()
-		c.resultCh <- ASRResult{Text: text, IsFinal: isFinal}
-		if isFinal {
-			c.finalOnce.Do(func() { close(c.final) })
-		}
+		c.resultCh <- ASRResult{Text: text, IsFinal: isFinalResult}
+	}
+	if isLastPacket {
+		c.finalOnce.Do(func() { close(c.final) })
 	}
 }

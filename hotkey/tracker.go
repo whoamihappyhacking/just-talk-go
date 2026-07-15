@@ -127,7 +127,10 @@ func (t *KeyStateTracker) KeyDown(key KeyCode, now time.Time) []Event {
 	// Check watched combos: standard modifier+key combos
 	if !key.IsModifier() {
 		combo := Combo{Mods: t.activeMods, Key: key}
-		if _, ok := t.watched[combo]; ok {
+		if combo.Mods != ModNone {
+			if _, ok := t.watched[combo]; !ok {
+				return events
+			}
 			t.activeStandardCombos[combo] = true
 			events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
 		}

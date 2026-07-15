@@ -3,32 +3,20 @@
 package autotype
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"time"
 	"unsafe"
 
+	"github.com/c/just-talk-go/internal/clipboard"
 	"golang.org/x/sys/windows"
 )
 
 var (
 	user32        = windows.NewLazySystemDLL("user32.dll")
 	procSendInput = user32.NewProc("SendInput")
-	procVkKeyScan = user32.NewProc("VkKeyScanW")
 )
-
-type keyboardInput struct {
-	Type    uint32
-	Wvk     uint16
-	Wscan   uint16
-	DwFlags uint32
-	Time    uint32
-	DwExtra uintptr
-}
-
-type input struct {
-	Type uint32
-	Ki   keyboardInput
-}
 
 const (
 	inputKeyboard  = 1
@@ -36,7 +24,19 @@ const (
 )
 
 func pastePlatform(text string, logger *slog.Logger) error {
-	return fmt.Errorf("autotype on Windows is not implemented")
+	cb, err := clipboard.New()
+	if err != nil {
+		return fmt.Errorf("clipboard: %w", err)
+	}
+	if err := cb.Set(text); err != nil {
+		return fmt.Errorf("set clipboard: %w", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if err := simulatePaste(); err != nil {
+		return fmt.Errorf("simulate paste: %w", err)
+	}
+	logger.Debug("autotype done", "text_len", len(text), "method", pasteMethod())
+	return nil
 }
 
 func simulatePaste() error {
@@ -51,27 +51,38 @@ func simulatePaste() error {
 		{0x11, true},  // VK_CONTROL up
 	}
 
-	var inputs []input
-	for _, k := range keys {
+	inputSize := 28
+	dataOffset := 4
+	extraInfoOffset := 12
+	if unsafe.Sizeof(uintptr(0)) == 8 {
+		inputSize = 40
+		dataOffset = 8
+		extraInfoOffset = 16
+	}
+	inputs := make([]byte, inputSize*len(keys))
+	for i, k := range keys {
 		flags := uint32(0)
 		if k.up {
 			flags = keyeventfKeyUp
 		}
-		inputs = append(inputs, input{
-			Type: inputKeyboard,
-			Ki: keyboardInput{
-				Wvk:     k.code,
-				DwFlags: flags,
-			},
-		})
+		base := i * inputSize
+		binary.LittleEndian.PutUint32(inputs[base:], inputKeyboard)
+		binary.LittleEndian.PutUint16(inputs[base+dataOffset:], k.code)
+		binary.LittleEndian.PutUint32(inputs[base+dataOffset+4:], flags)
+		if unsafe.Sizeof(uintptr(0)) == 8 {
+			binary.LittleEndian.PutUint64(inputs[base+dataOffset+extraInfoOffset:], 0)
+		} else {
+			binary.LittleEndian.PutUint32(inputs[base+dataOffset+extraInfoOffset:], 0)
+		}
 	}
 
-	cbSize := unsafe.Sizeof(input{})
-	procSendInput.Call(
-		uintptr(len(inputs)),
-		uintptr(unsafe.Pointer(&inputs[0])),
-		uintptr(cbSize),
+	sent, _, err := procSendInput.Call(
+		uintptr(len(keys)),
+		uintptr(unsafe.Pointer(&inputs[0])), uintptr(inputSize),
 	)
+	if sent != uintptr(len(keys)) {
+		return fmt.Errorf("SendInput inserted %d of %d keyboard events: %w", sent, len(keys), err)
+	}
 	return nil
 }
 

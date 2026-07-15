@@ -16,25 +16,25 @@ It is built for people who want to type less and speak more while coding, chatti
 - Voice hotkeys are limited to keys suitable for global shortcuts: modifiers, function keys, Tab, CapsLock, arrow/navigation keys, and similar non-text keys. Letters, digits, punctuation, Space, and other text-producing keys are rejected.
 - Doubao streaming ASR with optimized bidirectional streaming and second-pass recognition.
 - Clipboard copy and automatic text submission.
-- Always-on-top recording status overlay for Wayland, X11, and macOS.
+- Always-on-top recording status overlay for Wayland, X11, macOS, and Windows.
 - TUI configuration for hotkeys, mode, auto-submit, stop delay, hotwords, and related settings.
 - ASR hotwords for project names, people names, English terms, and domain-specific vocabulary.
 - Usage statistics for total sessions, total recognized characters, average speed, and recent speed.
 
 ## Platform Status
 
-The current development focus is Linux and macOS desktop support:
+Linux, macOS, and Windows desktops are supported:
 
 | Platform | Status | Notes |
 | --- | --- | --- |
 | Linux Wayland | Supported | Works with Sway / wlroots; hotkeys use evdev and require input permissions |
 | Linux X11 | Supported | Uses native X11 global hotkeys |
 | macOS | Supported | Global hotkeys use CGEventTap, recording uses CoreAudio, clipboard uses NSPasteboard, and overlay uses AppKit NSPanel |
-| Windows | Not implemented | Not supported yet |
+| Windows 10/11 | Supported | Global key-state monitoring with a low-level keyboard-hook fallback, WinMM recording, Unicode clipboard, SendInput auto-submit, and a Win32 status overlay |
 
 ## Build
 
-Just Talk uses native platform APIs, so builds require cgo.
+Just Talk uses native platform APIs. Linux and macOS builds require cgo; Windows uses direct Win32 calls from Go and does not require cgo.
 
 Linux build dependencies:
 
@@ -53,11 +53,25 @@ macOS build dependencies:
 xcode-select --install
 ```
 
+Windows build dependency:
+
+```powershell
+# Install Go 1.25 or later. No ffmpeg, SoX, or C compiler is required.
+winget install --id GoLang.Go --exact
+```
+
 Build for the current platform:
 
 ```bash
 cd just-talk-go
 CGO_ENABLED=1 go build -o build/just-talk ./cmd/just-talk
+```
+
+Windows PowerShell:
+
+```powershell
+cd just-talk-go
+go build -o build\just-talk.exe .\cmd\just-talk
 ```
 
 Install to `~/.local/bin/just-talk`:
@@ -71,6 +85,13 @@ make install
 ```
 
 macOS must be built on macOS. The project does not provide a non-cgo build.
+
+Install on Windows to `%LOCALAPPDATA%\Programs\Just Talk\just-talk.exe`:
+
+```powershell
+.\build\just-talk.exe --install
+# If the directory is not already in PATH, follow the note printed by the command.
+```
 
 ## Usage
 
@@ -93,12 +114,22 @@ just-talk --backend wayland
 just-talk --backend x11
 ```
 
+Windows selects its native backend automatically. Check the microphone and configuration before first use:
+
+```powershell
+.\build\just-talk.exe --doctor
+```
+
 ## Configuration
 
 Default config path:
 
 ```text
+# Linux / macOS
 ~/.config/just-talk/config.toml
+
+# Windows
+%APPDATA%\just-talk\config.toml
 ```
 
 Recommended hotkey config:
@@ -132,6 +163,9 @@ macOS hotkey example:
 # Option is Alt; Command/Cmd is Super.
 push_to_talk = "Option+Command"
 ```
+
+On Windows, `Win` and `Super` both refer to the Windows logo key. If recording is unavailable, allow desktop applications to access the microphone under Windows Settings > Privacy & security > Microphone.
+
 
 ## Changelog
 

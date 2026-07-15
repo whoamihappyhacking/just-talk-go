@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,8 @@ import (
 const (
 	defaultStopDelayMs = 800
 	errorHoldDuration  = 10 * time.Second
+	audioSendTimeout   = 3 * time.Second
+	audioDrainTimeout  = 4 * time.Second
 )
 
 var (
@@ -177,7 +180,9 @@ func saveTUIStats(stats TUIVoiceStats) {
 func statsPath() string {
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
-		if home, err := os.UserHomeDir(); err == nil {
+		if cache, err := os.UserCacheDir(); runtime.GOOS == "windows" && err == nil {
+			base = cache
+		} else if home, err := os.UserHomeDir(); err == nil {
 			base = filepath.Join(home, ".local", "state")
 		} else {
 			base = "."
@@ -256,6 +261,7 @@ type VoicePlugin struct {
 	recorder               *Recorder
 	asrClient              *ASRClient
 	asrCancel              context.CancelFunc
+	audioDone              <-chan struct{}
 	autoSubmit             bool
 	stopDelayMs            int
 	pendingDone            int
@@ -275,6 +281,7 @@ type recordingSession struct {
 	recorder    *Recorder
 	asrClient   *ASRClient
 	asrCancel   context.CancelFunc
+	audioDone   <-chan struct{}
 	autoSubmit  bool
 	userStopped bool
 	startedAt   time.Time
@@ -590,12 +597,17 @@ func (p *VoicePlugin) connectASR(ctx context.Context, cancel context.CancelFunc,
 		cancel()
 		return
 	}
+	audioDone := make(chan struct{})
 	p.asrClient = client
+	p.audioDone = audioDone
 	p.publishStatusLocked()
 	p.mu.Unlock()
 
 	go client.ReceiveLoop(ctx)
-	go p.streamAudio(ctx, rec, client)
+	go func() {
+		defer close(audioDone)
+		p.streamAudio(ctx, rec, client)
+	}()
 	go func() {
 		for result := range client.Results() {
 			if result.Error != nil {
@@ -697,12 +709,13 @@ func (p *VoicePlugin) detachRecordingLocked() *recordingSession {
 		recorder:    p.recorder,
 		asrClient:   p.asrClient,
 		asrCancel:   p.asrCancel,
+		audioDone:   p.audioDone,
 		autoSubmit:  p.autoSubmit,
 		userStopped: p.userStopped,
 		startedAt:   p.startedAt,
 	}
 	p.sessionGen++
-	p.recorder, p.asrClient, p.asrCancel = nil, nil, nil
+	p.recorder, p.asrClient, p.asrCancel, p.audioDone = nil, nil, nil, nil
 	p.startedAt = time.Time{}
 	p.recording, p.stopping, p.userStopped = false, false, false
 	p.holdReleased = false
@@ -737,28 +750,48 @@ func (p *VoicePlugin) finishRecordingSession(session *recordingSession) {
 	}
 
 	if session.asrClient != nil {
-		p.logger.Debug("finish session: sending final audio", "bytes", len(remaining))
-		sendCtx, sendCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if len(remaining) > 0 {
-			if err := session.asrClient.SendAudio(sendCtx, remaining, true); err != nil {
-				p.logger.Warn("send final audio failed", "error", err)
-			}
-		} else {
-			if err := session.asrClient.SendAudio(sendCtx, nil, true); err != nil {
-				p.logger.Warn("send final audio marker failed", "error", err)
+		audioDrained := true
+		if session.audioDone != nil {
+			p.logger.Debug("finish session: waiting audio stream drain")
+			select {
+			case <-session.audioDone:
+				p.logger.Debug("finish session: audio stream drained")
+			case <-time.After(audioDrainTimeout):
+				audioDrained = false
+				p.logger.Warn("finish session: audio stream drain timed out")
+				if !p.sessionCanceled(session.sessionID) {
+					p.publishError("停止录音超时: 等待音频发送结束超过 4s", session.sessionID)
+				}
 			}
 		}
-		sendCancel()
-		p.logger.Debug("finish session: waiting ASR final")
-		select {
-		case <-session.asrClient.Final():
-			p.logger.Debug("finish session: ASR final received")
-		case <-session.asrClient.Done():
-			p.logger.Debug("finish session: ASR done")
-		case <-time.After(15 * time.Second):
-			if !p.sessionCanceled(session.sessionID) {
-				pout("⚠️  识别超时")
-				p.publishError("识别超时: 等待 ASR final 超过 15s", session.sessionID)
+
+		finalSent := false
+		if audioDrained {
+			p.logger.Debug("finish session: sending final audio", "bytes", len(remaining))
+			sendCtx, sendCancel := context.WithTimeout(context.Background(), audioSendTimeout)
+			err := session.asrClient.SendAudio(sendCtx, remaining, true)
+			sendCancel()
+			if err != nil {
+				p.logger.Warn("send final audio failed", "error", err)
+				if !p.sessionCanceled(session.sessionID) {
+					p.publishError("结束识别失败: "+shortError(err), session.sessionID)
+				}
+			} else {
+				finalSent = true
+			}
+		}
+		if finalSent {
+			p.logger.Debug("finish session: waiting ASR final")
+			select {
+			case <-session.asrClient.Final():
+				p.logger.Debug("finish session: ASR final received")
+			case <-session.asrClient.Done():
+				p.logger.Debug("finish session: ASR done")
+			case <-time.After(15 * time.Second):
+				if !p.sessionCanceled(session.sessionID) {
+					pout("⚠️  识别超时")
+					p.publishError("识别超时: 等待 ASR final 超过 15s", session.sessionID)
+				}
 			}
 		}
 		if text := session.asrClient.LastText(); text != "" && session.userStopped && p.claimSessionOutput(session.sessionID) {
@@ -988,7 +1021,15 @@ func (p *VoicePlugin) streamAudio(ctx context.Context, rec *Recorder, client *AS
 		}
 		n, err := rec.Read(buf)
 		if n > 0 {
-			client.SendAudio(ctx, buf[:n], false)
+			sendCtx, sendCancel := context.WithTimeout(ctx, audioSendTimeout)
+			sendErr := client.SendAudio(sendCtx, buf[:n], false)
+			sendCancel()
+			if sendErr != nil {
+				if ctx.Err() == nil {
+					p.logger.Error("send audio error", "error", sendErr)
+				}
+				return
+			}
 		}
 		if err == io.EOF || (err != nil && ctx.Err() != nil) {
 			return

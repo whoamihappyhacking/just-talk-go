@@ -16,7 +16,7 @@ const (
 // Provider is the platform-specific global hotkey backend.
 //
 // Each platform has its own implementation:
-//   - Windows:  RegisterHotKey + SetWindowsHookEx
+//   - Windows:  GetAsyncKeyState polling with a WH_KEYBOARD_LL fallback
 //   - macOS:    CGEventTap
 //   - Linux X11: XGrabKey + X event loop
 //   - Linux Wayland: evdev (/dev/input/event*) or XDG Desktop Portal
