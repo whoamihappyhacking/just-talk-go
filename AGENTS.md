@@ -21,6 +21,7 @@ go test ./... -tags no_x11
 CGO_ENABLED=1 go build -o build/just-talk ./cmd/just-talk
 go build -o build/just-talk.exe ./cmd/just-talk  # Windows
 JUST_TALK_TEST_WINDOWS_AUDIO=1 go test ./plugins/voice -run TestWindowsRecorderIntegration -v
+JUST_TALK_TEST_WINDOWS_HOTKEY=1 go test ./hotkey -run TestWindowsHookFallbackIntegration -v
 ```
 
 Do not add or preserve non-cgo macOS fallback builds. A build that compiles but cannot provide native hotkeys, recording, clipboard, auto-submit, or overlay is worse than an explicit build failure.
@@ -59,6 +60,7 @@ macOS:
 Windows:
 
 - Global hotkeys poll `GetAsyncKeyState` at 5 ms intervals and use `WH_KEYBOARD_LL` as a physical-key fallback. Providers emit state edges without key-repeat events.
+- Suppressed modifier-only voice shortcuts such as `Alt+Super` are consumed by the low-level hook. Candidate modifier events are replayed with `SendInput` when they turn out to be unrelated shortcuts, so normal `Alt`, `Super`, and combinations such as `Alt+Tab` keep working.
 - Recording uses native `winmm` wave input at 16 kHz, 16-bit mono PCM.
 - Clipboard operations use the Win32 Unicode clipboard through the existing clipboard dependency.
 - Auto-submit uses `SendInput` to post Ctrl+V.

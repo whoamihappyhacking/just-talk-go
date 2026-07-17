@@ -19,7 +19,7 @@ func TestWindowsProviderAppliesGlobalKeyStateEdges(t *testing.T) {
 	combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}
 	pressed := make(map[KeyCode]bool)
 	p.keyDown = func(key KeyCode) bool { return pressed[key] }
-	ch, err := p.Register(combo)
+	ch, err := p.RegisterWithOptions(combo, RegisterOptions{Suppress: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +66,46 @@ func TestWindowsProviderUsesHookStateWhenPollingMissesSuper(t *testing.T) {
 	}
 }
 
+func TestWindowsSuppressesModifierOnlyComboEdges(t *testing.T) {
+	p := newWindowsTestProvider(t)
+	combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}
+	p.suppressCombos[combo] = struct{}{}
+
+	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
+	assertHookDecision(t, applyWindowsHookEvent(p, vkLWin, true), true, nil)
+	assertHookDecision(t, applyWindowsHookEvent(p, vkLWin, false), true, nil)
+	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, false), true, nil)
+	if p.activeSuppress != ModNone {
+		t.Fatalf("active suppression remained after release: %s", p.activeSuppress)
+	}
+}
+
+func TestWindowsReplaysSinglePendingModifier(t *testing.T) {
+	p := newWindowsTestProvider(t)
+	p.suppressCombos[Combo{Mods: ModAlt | ModSuper, Key: KeyNone}] = struct{}{}
+
+	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
+	decision := applyWindowsHookEvent(p, vkLMenu, false)
+	assertHookDecision(t, decision, true, []windowsReplayKey{
+		{VirtualKey: vkLMenu, Down: true},
+		{VirtualKey: vkLMenu, Down: false},
+	})
+}
+
+func TestWindowsReplaysPendingModifierBeforeOtherKey(t *testing.T) {
+	p := newWindowsTestProvider(t)
+	p.suppressCombos[Combo{Mods: ModAlt | ModSuper, Key: KeyNone}] = struct{}{}
+
+	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
+	decision := applyWindowsHookEvent(p, vkTab, true)
+	assertHookDecision(t, decision, true, []windowsReplayKey{
+		{VirtualKey: vkLMenu, Down: true},
+		{VirtualKey: vkTab, Down: true},
+	})
+	assertHookDecision(t, applyWindowsHookEvent(p, vkTab, false), false, nil)
+	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, false), false, nil)
+}
+
 func TestWindowsHookFallbackIntegration(t *testing.T) {
 	if os.Getenv("JUST_TALK_TEST_WINDOWS_HOTKEY") == "" {
 		t.Skip("set JUST_TALK_TEST_WINDOWS_HOTKEY=1 to test the low-level keyboard hook")
@@ -88,13 +128,16 @@ func TestWindowsHookFallbackIntegration(t *testing.T) {
 	time.Sleep(250 * time.Millisecond)
 
 	keybdEvent := modUser32.NewProc("keybd_event")
-	keybdEvent.Call(vkLMenu, 0, 0, 0)
-	time.Sleep(30 * time.Millisecond)
-	keybdEvent.Call(vkLWin, 0, 0, 0)
-	assertWindowsEventWithin(t, ch, combo, KeyDown, 2*time.Second)
-	keybdEvent.Call(vkLWin, 0, 2, 0)
-	keybdEvent.Call(vkLMenu, 0, 2, 0)
-	assertWindowsEventWithin(t, ch, combo, KeyUp, 2*time.Second)
+	for cycle := 0; cycle < 2; cycle++ {
+		keybdEvent.Call(vkLMenu, 0, 0, 0)
+		time.Sleep(30 * time.Millisecond)
+		keybdEvent.Call(vkLWin, 0, 0, 0)
+		assertWindowsEventWithin(t, ch, combo, KeyDown, 2*time.Second)
+		keybdEvent.Call(vkLWin, 0, 2, 0)
+		keybdEvent.Call(vkLMenu, 0, 2, 0)
+		assertWindowsEventWithin(t, ch, combo, KeyUp, 2*time.Second)
+		time.Sleep(50 * time.Millisecond)
+	}
 	keybdEvent.Call(vkEscape, 0, 0, 0)
 	keybdEvent.Call(vkEscape, 0, 2, 0)
 
@@ -130,5 +173,46 @@ func assertWindowsEventWithin(t *testing.T, ch <-chan Event, combo Combo, eventT
 		}
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for %s for %s", eventType, combo)
+	}
+}
+
+func newWindowsTestProvider(t *testing.T) *windowsProvider {
+	t.Helper()
+	provider, err := NewProvider()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provider.(*windowsProvider)
+}
+
+func applyWindowsHookEvent(p *windowsProvider, virtualKey uint32, down bool) windowsHookDecision {
+	event := windowsLowLevelKeyEvent{VirtualKey: virtualKey}
+	if !down {
+		event.Flags = llkhfUp
+	}
+	p.hookMu.Lock()
+	wasDown := p.hookDown[virtualKey]
+	if down {
+		p.hookDown[virtualKey] = true
+	} else {
+		delete(p.hookDown, virtualKey)
+	}
+	decision := p.suppressionDecisionLocked(event, down, wasDown)
+	p.hookMu.Unlock()
+	return decision
+}
+
+func assertHookDecision(t *testing.T, got windowsHookDecision, suppress bool, replay []windowsReplayKey) {
+	t.Helper()
+	if got.Suppress != suppress {
+		t.Fatalf("Suppress = %v, want %v", got.Suppress, suppress)
+	}
+	if len(got.Replay) != len(replay) {
+		t.Fatalf("Replay = %+v, want %+v", got.Replay, replay)
+	}
+	for i := range replay {
+		if got.Replay[i].VirtualKey != replay[i].VirtualKey || got.Replay[i].Down != replay[i].Down {
+			t.Fatalf("Replay[%d] = %+v, want %+v", i, got.Replay[i], replay[i])
+		}
 	}
 }

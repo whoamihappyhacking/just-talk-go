@@ -30,7 +30,7 @@ Linux, macOS, and Windows desktops are supported:
 | Linux Wayland | Supported | Works with Sway / wlroots; hotkeys use evdev and require input permissions |
 | Linux X11 | Supported | Uses native X11 global hotkeys |
 | macOS | Supported | Global hotkeys use CGEventTap, recording uses CoreAudio, clipboard uses NSPasteboard, and overlay uses AppKit NSPanel |
-| Windows 10/11 | Supported | Global key-state monitoring with a low-level keyboard-hook fallback, WinMM recording, Unicode clipboard, SendInput auto-submit, and a Win32 status overlay |
+| Windows 10/11 | Supported | Global key-state monitoring with a low-level keyboard-hook fallback, global shortcut suppression, WinMM recording, Unicode clipboard, SendInput auto-submit, and a Win32 status overlay |
 
 ## Build
 
@@ -140,7 +140,7 @@ mode = "toggle"
 push_to_talk = "Alt+Super"
 ```
 
-`Alt+Super` with `toggle` mode is recommended. Press once to start recording, then press again to stop. This avoids hold-mode key conflicts with desktop environments or focused input fields.
+`Alt+Super` with `toggle` mode is recommended. Press once to start recording, then press again to stop. This avoids hold-mode key conflicts with desktop environments or focused input fields. On Windows, modifier-only voice shortcuts are fully consumed by the low-level keyboard hook, so they do not reach the focused application and activate its menus or toolbars. Unrelated uses of `Alt`, `Super`, and shortcuts such as `Alt+Tab` are replayed normally.
 
 Voice hotkeys only support keys suitable for global shortcuts:
 

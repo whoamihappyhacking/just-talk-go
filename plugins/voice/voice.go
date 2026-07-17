@@ -365,7 +365,7 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 		if isOld {
 			p.env.UnregisterHotkey(oldCombo)
 		}
-		opts := hotkey.RegisterOptions{Suppress: mode == "hold"}
+		opts := hotkey.RegisterOptions{Suppress: mode == "hold" || (runtime.GOOS == "windows" && combo.IsModifierOnly())}
 		if err := p.env.RegisterHotkeyWithOptions(combo, opts, p.onHotkey); err != nil {
 			return fmt.Errorf("register hotkey: %w", err)
 		}
