@@ -93,6 +93,22 @@ Windows 安装到 `%LOCALAPPDATA%\Programs\Just Talk\just-talk.exe`：
 # 如果安装目录尚未在 PATH 中，按命令输出提示添加即可。
 ```
 
+## Release 下载
+
+GitHub Release 提供以下预编译归档：
+
+- Linux amd64 / arm64
+- macOS Intel / Apple Silicon
+- Windows amd64 / arm64
+- `SHA256SUMS.txt` 文件校验
+
+发布流程使用 GoReleaser v2 和官方 `goreleaser/goreleaser-action`。Linux、macOS 和 Windows 二进制分别在对应的 GitHub 托管 runner 上原生构建；维护者推送 `v*` 标签时会自动构建并发布，例如：
+
+```bash
+git tag v0.7.0
+git push origin v0.7.0
+```
+
 ## 使用
 
 默认启动 TUI：

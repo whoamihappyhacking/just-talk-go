@@ -18,11 +18,14 @@ make run                # Run on the current platform
 make test               # Run all tests
 go test ./...           # Faster default test command
 go test ./... -tags no_x11
+goreleaser check
 CGO_ENABLED=1 go build -o build/just-talk ./cmd/just-talk
 go build -o build/just-talk.exe ./cmd/just-talk  # Windows
 JUST_TALK_TEST_WINDOWS_AUDIO=1 go test ./plugins/voice -run TestWindowsRecorderIntegration -v
 JUST_TALK_TEST_WINDOWS_HOTKEY=1 go test ./hotkey -run TestWindowsHookFallbackIntegration -v
 ```
+
+Release builds are configured by `.goreleaser.yaml` and `.github/workflows/release.yml`, using GoReleaser v2 through the official `goreleaser/goreleaser-action`. Pushing a `v*` tag builds and publishes Linux, macOS, and Windows archives for amd64 and arm64, plus `SHA256SUMS.txt`. Linux and macOS release binaries must remain native cgo builds on their respective GitHub-hosted runners. GoReleaser OSS split/merge is not available, so each native matrix runner creates one archive and the final job only merges those archives into the GitHub Release.
 
 Do not add or preserve non-cgo macOS fallback builds. A build that compiles but cannot provide native hotkeys, recording, clipboard, auto-submit, or overlay is worse than an explicit build failure.
 

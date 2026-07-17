@@ -1,0 +1,115 @@
+version: 2
+
+project_name: just-talk
+
+builds:
+  - id: linux-amd64
+    main: ./cmd/just-talk
+    binary: just-talk
+    goos:
+      - linux
+    goarch:
+      - amd64
+    env:
+      - CGO_ENABLED={{ .Env.CGO_ENABLED }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    skip: '{{ ne .Env.RELEASE_TARGET "linux-amd64" }}'
+
+  - id: linux-arm64
+    main: ./cmd/just-talk
+    binary: just-talk
+    goos:
+      - linux
+    goarch:
+      - arm64
+    env:
+      - CGO_ENABLED={{ .Env.CGO_ENABLED }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    skip: '{{ ne .Env.RELEASE_TARGET "linux-arm64" }}'
+
+  - id: darwin-amd64
+    main: ./cmd/just-talk
+    binary: just-talk
+    goos:
+      - darwin
+    goarch:
+      - amd64
+    env:
+      - CGO_ENABLED={{ .Env.CGO_ENABLED }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    skip: '{{ ne .Env.RELEASE_TARGET "darwin-amd64" }}'
+
+  - id: darwin-arm64
+    main: ./cmd/just-talk
+    binary: just-talk
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    env:
+      - CGO_ENABLED={{ .Env.CGO_ENABLED }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    skip: '{{ ne .Env.RELEASE_TARGET "darwin-arm64" }}'
+
+  - id: windows-amd64
+    main: ./cmd/just-talk
+    binary: just-talk
+    goos:
+      - windows
+    goarch:
+      - amd64
+    env:
+      - CGO_ENABLED={{ .Env.CGO_ENABLED }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    skip: '{{ ne .Env.RELEASE_TARGET "windows-amd64" }}'
+
+  - id: windows-arm64
+    main: ./cmd/just-talk
+    binary: just-talk
+    goos:
+      - windows
+    goarch:
+      - arm64
+    env:
+      - CGO_ENABLED={{ .Env.CGO_ENABLED }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    skip: '{{ ne .Env.RELEASE_TARGET "windows-arm64" }}'
+
+archives:
+  - name_template: "just-talk_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: true
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - README.en.md
+      - LICENSE
+
+checksum:
+  disable: true
+
+changelog:
+  disable: true
+
+release:
+  disable: true

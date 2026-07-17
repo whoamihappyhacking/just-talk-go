@@ -1,5 +1,6 @@
 # Build outputs
 /build/
+/dist/
 /just-talk
 /cmd/just-talk/just-talk
 *.exe

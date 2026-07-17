@@ -93,6 +93,22 @@ Install on Windows to `%LOCALAPPDATA%\Programs\Just Talk\just-talk.exe`:
 # If the directory is not already in PATH, follow the note printed by the command.
 ```
 
+## Release Downloads
+
+GitHub Releases provide prebuilt archives for:
+
+- Linux amd64 / arm64
+- macOS Intel / Apple Silicon
+- Windows amd64 / arm64
+- `SHA256SUMS.txt` checksum verification
+
+The release workflow uses GoReleaser v2 with the official `goreleaser/goreleaser-action`. Linux, macOS, and Windows binaries are built natively on matching GitHub-hosted runners. Maintainers can build and publish a release by pushing a `v*` tag, for example:
+
+```bash
+git tag v0.7.0
+git push origin v0.7.0
+```
+
 ## Usage
 
 Start the TUI:

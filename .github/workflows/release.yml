@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.25.x"
+  GORELEASER_VERSION: "v2.17.0"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux amd64
+            runner: ubuntu-24.04
+            target: linux-amd64
+            goos: linux
+            goarch: amd64
+            cgo_enabled: "1"
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            target: linux-arm64
+            goos: linux
+            goarch: arm64
+            cgo_enabled: "1"
+          - name: macOS Intel
+            runner: macos-15-intel
+            target: darwin-amd64
+            goos: darwin
+            goarch: amd64
+            cgo_enabled: "1"
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: darwin-arm64
+            goos: darwin
+            goarch: arm64
+            cgo_enabled: "1"
+          - name: Windows amd64
+            runner: windows-2025
+            target: windows-amd64
+            goos: windows
+            goarch: amd64
+            cgo_enabled: "0"
+          - name: Windows arm64
+            runner: windows-11-arm
+            target: windows-arm64
+            goos: windows
+            goarch: arm64
+            cgo_enabled: "0"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install Linux native dependencies
+        if: matrix.goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libwayland-dev \
+            libx11-dev \
+            libxext-dev \
+            libxinerama-dev \
+            libxrender-dev \
+            libxtst-dev
+
+      - name: Test
+        if: matrix.goarch == 'amd64'
+        env:
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
+        run: go test ./...
+
+      - name: Build archive with GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean --snapshot --skip=publish,validate
+        env:
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          RELEASE_TARGET: ${{ matrix.target }}
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" \
+              dist/*.tar.gz \
+              dist/*.zip \
+              dist/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              dist/*.tar.gz \
+              dist/*.zip \
+              dist/SHA256SUMS.txt \
+              --verify-tag \
+              --generate-notes \
+              --title "${GITHUB_REF_NAME}"
+          fi
