@@ -4,6 +4,12 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+## v0.0.2 - 2026-07-21
+
+- Fixed intermittent Windows `Alt+Super` false activations where stale low-level hook state could make a later Alt-only press look like the full shortcut; Windows modifier combinations now require an exact modifier set and reset stale suppressed state after physical release.
+
+## v0.0.1 - 2026-07-17
+
 - Added a tag-triggered GoReleaser v2 pipeline using the official GitHub Action to build Linux, macOS, and Windows amd64/arm64 archives on native runners and publish SHA256 checksums.
 - Added Windows 10/11 support with global key-state monitoring, native WinMM microphone capture, Unicode clipboard access, SendInput auto-submit, a click-through Win32 status overlay, and Windows environment checks.
 - Added Windows-standard config, state, log, and per-user installation paths. Windows builds no longer require external recording or clipboard commands.

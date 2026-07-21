@@ -156,7 +156,7 @@ mode = "toggle"
 push_to_talk = "Alt+Super"
 ```
 
-`Alt+Super` with `toggle` mode is recommended. Press once to start recording, then press again to stop. This avoids hold-mode key conflicts with desktop environments or focused input fields. On Windows, modifier-only voice shortcuts are fully consumed by the low-level keyboard hook, so they do not reach the focused application and activate its menus or toolbars. Unrelated uses of `Alt`, `Super`, and shortcuts such as `Alt+Tab` are replayed normally.
+`Alt+Super` with `toggle` mode is recommended. Press once to start recording, then press again to stop. This avoids hold-mode key conflicts with desktop environments or focused input fields. On Windows, modifier-only voice shortcuts are fully consumed by the low-level keyboard hook, so they do not reach the focused application and activate its menus or toolbars. Windows requires the exact configured modifier set and clears stale suppressed state after the physical keys are released, so an Alt-only press cannot inherit an old Super state. Unrelated uses of `Alt`, `Super`, and shortcuts such as `Alt+Tab` are replayed normally.
 
 Voice hotkeys only support keys suitable for global shortcuts:
 

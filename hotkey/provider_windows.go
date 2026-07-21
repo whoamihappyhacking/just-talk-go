@@ -42,6 +42,7 @@ const (
 	windowsKeyEventExtended = 0x0001
 	windowsKeyEventUp       = 0x0002
 	windowsReplayMarker     = 0x4A54534B
+	windowsSuppressResetLag = 50 * time.Millisecond
 )
 
 // Windows virtual key codes not in windows package.
@@ -196,17 +197,19 @@ type windowsProvider struct {
 	stopped     bool
 	logger      *slog.Logger
 
-	hookMu          sync.RWMutex
-	hookDown        map[uint32]bool
-	suppressCombos  map[Combo]struct{}
-	pendingSuppress map[uint32]windowsReplayKey
-	pendingOrder    []uint32
-	activeSuppress  Modifier
-	hookEvents      chan windowsHookDebugEvent
-	hookErrors      chan error
-	debugHookEvents bool
-	hook            windows.Handle
-	hookThreadID    uint32
+	hookMu             sync.RWMutex
+	hookDown           map[uint32]bool
+	suppressCombos     map[Combo]struct{}
+	pendingSuppress    map[uint32]windowsReplayKey
+	pendingOrder       []uint32
+	activeSuppress     Modifier
+	suppressMismatch   Modifier
+	suppressMismatchAt time.Time
+	hookEvents         chan windowsHookDebugEvent
+	hookErrors         chan error
+	debugHookEvents    bool
+	hook               windows.Handle
+	hookThreadID       uint32
 }
 
 type windowsLowLevelKeyEvent struct {
@@ -323,6 +326,11 @@ func (p *windowsProvider) Unregister(combo Combo) error {
 	p.mu.Unlock()
 	p.hookMu.Lock()
 	delete(p.suppressCombos, combo)
+	if len(p.suppressCombos) == 0 {
+		p.clearPendingSuppressLocked()
+		p.activeSuppress = ModNone
+		p.clearSuppressMismatchLocked()
+	}
 	p.hookMu.Unlock()
 
 	close(ch)
@@ -470,15 +478,26 @@ func (p *windowsProvider) recordHookEvent(event windowsLowLevelKeyEvent) bool {
 
 func (p *windowsProvider) suppressionDecisionLocked(event windowsLowLevelKeyEvent, down, wasDown bool) windowsHookDecision {
 	modifier := KeyCodeToModifier(winVKToKey[event.VirtualKey])
+	if down && !wasDown && modifier&p.activeSuppress != 0 {
+		// A modifier from the active suppression cycle was released and pressed
+		// again. Reconcile the other modifiers before stale hook state can turn
+		// this new press into a false combo.
+		rawMods := windowsActiveModifiers(p.pollKeyDown) | modifier
+		p.reconcileSuppressedModifiersLocked(rawMods, time.Now(), true)
+	}
 
 	if p.activeSuppress != ModNone && modifier&p.activeSuppress != 0 {
 		if !down && p.hookActiveModifiersLocked()&p.activeSuppress == ModNone {
 			p.activeSuppress = ModNone
+			p.clearSuppressMismatchLocked()
 		}
 		return windowsHookDecision{Suppress: true}
 	}
 
 	if active := p.activeSuppressedCombosLocked(); active != ModNone {
+		if p.activeSuppress == ModNone {
+			p.clearSuppressMismatchLocked()
+		}
 		p.activeSuppress |= active
 		p.clearPendingSuppressLocked()
 		if modifier&active != 0 {
@@ -523,7 +542,7 @@ func (p *windowsProvider) activeSuppressedCombosLocked() Modifier {
 	mods := p.hookActiveModifiersLocked()
 	var active Modifier
 	for combo := range p.suppressCombos {
-		if mods&combo.Mods == combo.Mods {
+		if mods == combo.Mods {
 			active |= combo.Mods
 		}
 	}
@@ -553,6 +572,55 @@ func (p *windowsProvider) pendingReplayLocked() []windowsReplayKey {
 func (p *windowsProvider) clearPendingSuppressLocked() {
 	clear(p.pendingSuppress)
 	p.pendingOrder = p.pendingOrder[:0]
+}
+
+func (p *windowsProvider) clearSuppressMismatchLocked() {
+	p.suppressMismatch = ModNone
+	p.suppressMismatchAt = time.Time{}
+}
+
+func (p *windowsProvider) activeModifiers(now time.Time) Modifier {
+	rawMods := windowsActiveModifiers(p.pollKeyDown)
+	p.hookMu.Lock()
+	reset := p.reconcileSuppressedModifiersLocked(rawMods, now, false)
+	hookMods := p.hookActiveModifiersLocked()
+	p.hookMu.Unlock()
+	if reset != ModNone {
+		p.logger.Debug("cleared stale suppressed modifier state", "mods", reset)
+	}
+	return rawMods | hookMods
+}
+
+func (p *windowsProvider) reconcileSuppressedModifiersLocked(rawMods Modifier, now time.Time, force bool) Modifier {
+	active := p.activeSuppress
+	if active == ModNone {
+		p.clearSuppressMismatchLocked()
+		return ModNone
+	}
+	missing := active &^ rawMods
+	if missing == ModNone {
+		p.clearSuppressMismatchLocked()
+		return ModNone
+	}
+	if !force {
+		if missing != p.suppressMismatch || p.suppressMismatchAt.IsZero() {
+			p.suppressMismatch = missing
+			p.suppressMismatchAt = now
+			return ModNone
+		}
+		if now.Sub(p.suppressMismatchAt) < windowsSuppressResetLag {
+			return ModNone
+		}
+	}
+	for virtualKey := range p.hookDown {
+		if KeyCodeToModifier(winVKToKey[virtualKey])&missing != ModNone {
+			delete(p.hookDown, virtualKey)
+		}
+	}
+	p.clearPendingSuppressLocked()
+	p.activeSuppress = ModNone
+	p.clearSuppressMismatchLocked()
+	return missing
 }
 
 func replayKeyFromHook(event windowsLowLevelKeyEvent, down bool) windowsReplayKey {
@@ -656,6 +724,9 @@ func (p *windowsProvider) runKeyboardHook(ctx context.Context, ready chan<- erro
 		p.hook = 0
 		p.hookThreadID = 0
 		p.hookDown = make(map[uint32]bool)
+		p.clearPendingSuppressLocked()
+		p.activeSuppress = ModNone
+		p.clearSuppressMismatchLocked()
 		p.hookMu.Unlock()
 	}()
 
@@ -716,7 +787,7 @@ func (p *windowsProvider) poll(now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	mods := windowsActiveModifiers(p.keyDown)
+	mods := p.activeModifiers(now)
 	if mods != p.lastMods {
 		p.logger.Debug("global modifier state changed", "mods", mods)
 		p.lastMods = mods
@@ -744,7 +815,7 @@ func windowsComboActive(combo Combo, keyDown func(KeyCode) bool) bool {
 
 func windowsComboActiveWithModifiers(combo Combo, mods Modifier, keyDown func(KeyCode) bool) bool {
 	if combo.IsModifierOnly() {
-		return mods&combo.Mods == combo.Mods
+		return mods == combo.Mods
 	}
 	if !keyDown(combo.Key) {
 		return false
@@ -752,10 +823,13 @@ func windowsComboActiveWithModifiers(combo Combo, mods Modifier, keyDown func(Ke
 	if combo.IsKeyOnly() {
 		return mods == ModNone
 	}
-	return mods&combo.Mods == combo.Mods
+	return mods == combo.Mods
 }
 
 func windowsActiveModifiers(keyDown func(KeyCode) bool) Modifier {
+	if keyDown == nil {
+		return ModNone
+	}
 	var mods Modifier
 	if keyDown(KeyCtrl) {
 		mods |= ModCtrl
