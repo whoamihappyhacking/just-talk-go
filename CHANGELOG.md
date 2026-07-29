@@ -4,6 +4,10 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+## v0.0.3 - 2026-07-29
+
+- Reworked Windows modifier-only hotkeys so the low-level hook only observes key edges and never consumes or replays modifiers. `Alt+Super` works through exact physical-state matching, stale hook state is cleared without combining separate single-key presses, and system shortcuts such as `Alt+Tab` remain untouched.
+
 ## v0.0.2 - 2026-07-21
 
 - Fixed intermittent Windows `Alt+Super` false activations where stale low-level hook state could make a later Alt-only press look like the full shortcut; Windows modifier combinations now require an exact modifier set and reset stale suppressed state after physical release.

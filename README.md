@@ -30,7 +30,7 @@ Just Talk 是一个面向桌面环境的语音输入工具。它通过全局快�
 | Linux Wayland | 已支持 | 已支持 Sway / wlroots 场景；快捷键基于 evdev，需要 input 权限 |
 | Linux X11 | 已支持 | 使用 X11 原生全局热键 |
 | macOS | 已支持 | 全局快捷键基于 CGEventTap，录音使用 CoreAudio，剪贴板使用 NSPasteboard，胶囊显示使用 AppKit NSPanel |
-| Windows 10/11 | 已支持 | 全局按键状态监听及低级键盘钩子回退、全局快捷键拦截、WinMM 录音、Unicode 剪贴板、SendInput 自动上屏和 Win32 状态胶囊 |
+| Windows 10/11 | 已支持 | 全局按键轮询及低级键盘钩子边沿回退、WinMM 录音、Unicode 剪贴板、SendInput 自动上屏和 Win32 状态胶囊 |
 
 ## 构建
 
@@ -156,7 +156,7 @@ mode = "toggle"
 push_to_talk = "Alt+Super"
 ```
 
-`Alt+Super` 配合 `toggle` 模式是推荐用法。按一次开始录音，再按一次停止录音，避免按住模式下和桌面环境或输入框发生按键冲突。在 Windows 上，这类纯修饰键语音快捷键会由低级键盘钩子完整消费，不会继续传递到当前聚焦窗口并激活菜单或工具栏。Windows 会精确匹配配置的修饰键集合，并在物理按键释放后清理残留的抑制状态，因此单独按 `Alt` 不会继承旧的 `Super` 状态而误触发；单独使用 `Alt`、`Super` 或 `Alt+Tab` 等其他快捷键时，按键会正常回放。
+`Alt+Super` 配合 `toggle` 模式是推荐用法。按一次开始录音，再按一次停止录音，避免按住模式下和桌面环境或输入框发生按键冲突。在 Windows 上，低级键盘钩子只观察按键边沿，不会消费或回放修饰键，因此单独使用 `Alt`、`Super` 或 `Alt+Tab` 时会保持系统原有行为。组合键必须精确匹配配置的修饰键集合；钩子回退状态会通过未拦截的物理按键状态校验，避免把两次独立的单键按下拼成组合键。
 
 语音热键只支持适合作为全局快捷键的按键：
 

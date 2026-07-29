@@ -22,7 +22,7 @@ goreleaser check
 CGO_ENABLED=1 go build -o build/just-talk ./cmd/just-talk
 go build -o build/just-talk.exe ./cmd/just-talk  # Windows
 JUST_TALK_TEST_WINDOWS_AUDIO=1 go test ./plugins/voice -run TestWindowsRecorderIntegration -v
-JUST_TALK_TEST_WINDOWS_HOTKEY=1 go test ./hotkey -run TestWindowsHookFallbackIntegration -v
+JUST_TALK_TEST_WINDOWS_HOTKEY=1 go test ./hotkey -run TestWindowsHookIntegration -v
 ```
 
 Release builds are configured by `.goreleaser.yaml` and `.github/workflows/release.yml`, using GoReleaser v2 through the official `goreleaser/goreleaser-action`. Pushing a `v*` tag builds and publishes Linux, macOS, and Windows archives for amd64 and arm64, plus `SHA256SUMS.txt`. Linux and macOS release binaries must remain native cgo builds on their respective GitHub-hosted runners. GoReleaser OSS split/merge is not available, so each native matrix runner creates one archive and the final job only merges those archives into the GitHub Release.
@@ -62,8 +62,8 @@ macOS:
 
 Windows:
 
-- Global hotkeys poll `GetAsyncKeyState` at 5 ms intervals and use `WH_KEYBOARD_LL` as a physical-key fallback. Providers emit state edges without key-repeat events.
-- Suppressed modifier-only voice shortcuts such as `Alt+Super` are consumed by the low-level hook. Candidate modifier events are replayed with `SendInput` when they turn out to be unrelated shortcuts, so normal `Alt`, `Super`, and combinations such as `Alt+Tab` keep working. Windows modifier combinations require an exact modifier set; after an active suppressed combo returns to a physically idle state, stale hook fallback state must be cleared before the combo can rearm.
+- Global hotkeys poll `GetAsyncKeyState` at 5 ms intervals and use `WH_KEYBOARD_LL` as a short-lived physical-edge fallback. Providers emit state edges without key-repeat events.
+- The low-level hook is observational: it must always pass events to the next hook and must not consume or replay modifier keys. This keeps normal `Alt`, `Super`, and combinations such as `Alt+Tab` untouched. Windows modifier combinations require an exact modifier set; hook fallback state is reconciled against the unsuppressed physical key state on new modifier presses and after release.
 - Recording uses native `winmm` wave input at 16 kHz, 16-bit mono PCM.
 - Clipboard operations use the Win32 Unicode clipboard through the existing clipboard dependency.
 - Auto-submit uses `SendInput` to post Ctrl+V.

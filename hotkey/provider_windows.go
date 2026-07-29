@@ -4,7 +4,6 @@ package hotkey
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,22 +26,15 @@ var (
 	procCallNextHookEx      = modUser32.NewProc("CallNextHookEx")
 	procGetMessageW         = modUser32.NewProc("GetMessageW")
 	procPostThreadMessageW  = modUser32.NewProc("PostThreadMessageW")
-	procSendInput           = modUser32.NewProc("SendInput")
 	procGetModuleHandleW    = modKernel32.NewProc("GetModuleHandleW")
 )
 
 const (
-	windowsPollInterval     = 5 * time.Millisecond
-	whKeyboardLL            = 13
-	wmQuit                  = 0x0012
-	llkhfExtended           = 0x0001
-	llkhfInjected           = 0x0010
-	llkhfUp                 = 0x0080
-	windowsInputKeyboard    = 1
-	windowsKeyEventExtended = 0x0001
-	windowsKeyEventUp       = 0x0002
-	windowsReplayMarker     = 0x4A54534B
-	windowsSuppressResetLag = 50 * time.Millisecond
+	windowsPollInterval = 5 * time.Millisecond
+	windowsHookResetLag = 50 * time.Millisecond
+	whKeyboardLL        = 13
+	wmQuit              = 0x0012
+	llkhfUp             = 0x0080
 )
 
 // Windows virtual key codes not in windows package.
@@ -197,19 +189,14 @@ type windowsProvider struct {
 	stopped     bool
 	logger      *slog.Logger
 
-	hookMu             sync.RWMutex
-	hookDown           map[uint32]bool
-	suppressCombos     map[Combo]struct{}
-	pendingSuppress    map[uint32]windowsReplayKey
-	pendingOrder       []uint32
-	activeSuppress     Modifier
-	suppressMismatch   Modifier
-	suppressMismatchAt time.Time
-	hookEvents         chan windowsHookDebugEvent
-	hookErrors         chan error
-	debugHookEvents    bool
-	hook               windows.Handle
-	hookThreadID       uint32
+	hookMu          sync.RWMutex
+	hookDown        map[uint32]bool
+	hookMismatch    Modifier
+	hookMismatchAt  time.Time
+	hookEvents      chan windowsHookDebugEvent
+	debugHookEvents bool
+	hook            windows.Handle
+	hookThreadID    uint32
 }
 
 type windowsLowLevelKeyEvent struct {
@@ -225,18 +212,6 @@ type windowsHookDebugEvent struct {
 	ScanCode   uint32
 	Flags      uint32
 	Down       bool
-}
-
-type windowsReplayKey struct {
-	VirtualKey uint32
-	ScanCode   uint32
-	Flags      uint32
-	Down       bool
-}
-
-type windowsHookDecision struct {
-	Suppress bool
-	Replay   []windowsReplayKey
 }
 
 type windowsHookPoint struct {
@@ -267,10 +242,7 @@ func NewProvider() (Provider, error) {
 		comboState:      make(map[Combo]bool),
 		pollKeyDown:     windowsKeyDown,
 		hookDown:        make(map[uint32]bool),
-		suppressCombos:  make(map[Combo]struct{}),
-		pendingSuppress: make(map[uint32]windowsReplayKey),
 		hookEvents:      make(chan windowsHookDebugEvent, 128),
-		hookErrors:      make(chan error, 8),
 		debugHookEvents: os.Getenv("JUST_TALK_DEBUG_WINDOWS_KEYS") == "1",
 		logger:          slog.Default().With("platform", "windows"),
 	}
@@ -282,7 +254,7 @@ func (p *windowsProvider) Register(combo Combo) (<-chan Event, error) {
 	return p.RegisterWithOptions(combo, RegisterOptions{})
 }
 
-func (p *windowsProvider) RegisterWithOptions(combo Combo, opts RegisterOptions) (<-chan Event, error) {
+func (p *windowsProvider) RegisterWithOptions(combo Combo, _ RegisterOptions) (<-chan Event, error) {
 	p.opMu.Lock()
 	defer p.opMu.Unlock()
 
@@ -303,11 +275,6 @@ func (p *windowsProvider) RegisterWithOptions(combo Combo, opts RegisterOptions)
 	p.channels[combo] = ch
 	p.comboState[combo] = false
 	p.mu.Unlock()
-	if opts.Suppress && combo.IsModifierOnly() {
-		p.hookMu.Lock()
-		p.suppressCombos[combo] = struct{}{}
-		p.hookMu.Unlock()
-	}
 	return ch, nil
 }
 
@@ -324,21 +291,11 @@ func (p *windowsProvider) Unregister(combo Combo) error {
 	delete(p.channels, combo)
 	delete(p.comboState, combo)
 	p.mu.Unlock()
-	p.hookMu.Lock()
-	delete(p.suppressCombos, combo)
-	if len(p.suppressCombos) == 0 {
-		p.clearPendingSuppressLocked()
-		p.activeSuppress = ModNone
-		p.clearSuppressMismatchLocked()
-	}
-	p.hookMu.Unlock()
-
 	close(ch)
 	return nil
 }
 
 func (p *windowsProvider) Start(ctx context.Context) error {
-	go p.logKeyboardHookErrors(ctx)
 	if p.debugHookEvents {
 		go p.logKeyboardHookEvents(ctx)
 	}
@@ -407,16 +364,15 @@ func (p *windowsProvider) Info() ProviderInfo {
 		Features: []string{
 			FeatureKeyDown, FeatureKeyUp, FeatureKeyPress,
 			FeatureModifierOnly, FeatureFunctionKey, FeatureCombo,
-			FeatureSuppressEvent,
 		},
 	}
 }
 
 func (p *windowsProvider) combinedKeyDown(key KeyCode) bool {
-	if p.hookKeyDown(key) {
+	if p.pollKeyDown != nil && p.pollKeyDown(key) {
 		return true
 	}
-	return p.pollKeyDown != nil && p.pollKeyDown(key)
+	return key.IsModifier() && p.hookKeyDown(key)
 }
 
 func (p *windowsProvider) hookKeyDown(key KeyCode) bool {
@@ -440,10 +396,7 @@ func (p *windowsProvider) setHookVirtualKey(virtualKey uint32, down bool) {
 	p.hookMu.Unlock()
 }
 
-func (p *windowsProvider) recordHookEvent(event windowsLowLevelKeyEvent) bool {
-	if event.Flags&llkhfInjected != 0 && event.ExtraInfo == windowsReplayMarker {
-		return false
-	}
+func (p *windowsProvider) recordHookEvent(event windowsLowLevelKeyEvent) {
 	down := event.Flags&llkhfUp == 0
 	p.hookMu.Lock()
 	wasDown := p.hookDown[event.VirtualKey]
@@ -452,16 +405,15 @@ func (p *windowsProvider) recordHookEvent(event windowsLowLevelKeyEvent) bool {
 	} else {
 		delete(p.hookDown, event.VirtualKey)
 	}
-	decision := p.suppressionDecisionLocked(event, down, wasDown)
-	p.hookMu.Unlock()
-	if len(decision.Replay) > 0 {
-		if err := replayWindowsKeys(decision.Replay); err != nil {
-			select {
-			case p.hookErrors <- err:
-			default:
-			}
+	modifier := KeyCodeToModifier(winVKToKey[event.VirtualKey])
+	if down && !wasDown && p.hookActiveModifiersLocked() != ModNone {
+		physicalMods := windowsActiveModifiers(p.pollKeyDown)
+		if modifier != ModNone {
+			physicalMods |= modifier
 		}
+		p.reconcileHookModifiersLocked(physicalMods, time.Now(), true)
 	}
+	p.hookMu.Unlock()
 	if wasDown != down && p.debugHookEvents {
 		select {
 		case p.hookEvents <- windowsHookDebugEvent{
@@ -473,80 +425,6 @@ func (p *windowsProvider) recordHookEvent(event windowsLowLevelKeyEvent) bool {
 		default:
 		}
 	}
-	return decision.Suppress
-}
-
-func (p *windowsProvider) suppressionDecisionLocked(event windowsLowLevelKeyEvent, down, wasDown bool) windowsHookDecision {
-	modifier := KeyCodeToModifier(winVKToKey[event.VirtualKey])
-	if down && !wasDown && modifier&p.activeSuppress != 0 {
-		// A modifier from the active suppression cycle was released and pressed
-		// again. Reconcile the other modifiers before stale hook state can turn
-		// this new press into a false combo.
-		rawMods := windowsActiveModifiers(p.pollKeyDown) | modifier
-		p.reconcileSuppressedModifiersLocked(rawMods, time.Now(), true)
-	}
-
-	if p.activeSuppress != ModNone && modifier&p.activeSuppress != 0 {
-		if !down && p.hookActiveModifiersLocked()&p.activeSuppress == ModNone {
-			p.activeSuppress = ModNone
-			p.clearSuppressMismatchLocked()
-		}
-		return windowsHookDecision{Suppress: true}
-	}
-
-	if active := p.activeSuppressedCombosLocked(); active != ModNone {
-		if p.activeSuppress == ModNone {
-			p.clearSuppressMismatchLocked()
-		}
-		p.activeSuppress |= active
-		p.clearPendingSuppressLocked()
-		if modifier&active != 0 {
-			return windowsHookDecision{Suppress: true}
-		}
-	}
-
-	if down && modifier != ModNone && p.suppressionCandidateLocked(modifier) {
-		if !wasDown {
-			p.pendingSuppress[event.VirtualKey] = replayKeyFromHook(event, true)
-			p.pendingOrder = append(p.pendingOrder, event.VirtualKey)
-		}
-		return windowsHookDecision{Suppress: true}
-	}
-
-	if len(p.pendingOrder) == 0 {
-		return windowsHookDecision{}
-	}
-	replay := p.pendingReplayLocked()
-	p.clearPendingSuppressLocked()
-	if !down && modifier != ModNone {
-		replay = append(replay, replayKeyFromHook(event, false))
-		return windowsHookDecision{Suppress: true, Replay: replay}
-	}
-	if down {
-		replay = append(replay, replayKeyFromHook(event, true))
-		return windowsHookDecision{Suppress: true, Replay: replay}
-	}
-	return windowsHookDecision{Replay: replay}
-}
-
-func (p *windowsProvider) suppressionCandidateLocked(modifier Modifier) bool {
-	for combo := range p.suppressCombos {
-		if combo.Mods&modifier != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *windowsProvider) activeSuppressedCombosLocked() Modifier {
-	mods := p.hookActiveModifiersLocked()
-	var active Modifier
-	for combo := range p.suppressCombos {
-		if mods == combo.Mods {
-			active |= combo.Mods
-		}
-	}
-	return active
 }
 
 func (p *windowsProvider) hookActiveModifiersLocked() Modifier {
@@ -559,56 +437,41 @@ func (p *windowsProvider) hookActiveModifiersLocked() Modifier {
 	return mods
 }
 
-func (p *windowsProvider) pendingReplayLocked() []windowsReplayKey {
-	replay := make([]windowsReplayKey, 0, len(p.pendingOrder))
-	for _, virtualKey := range p.pendingOrder {
-		if event, ok := p.pendingSuppress[virtualKey]; ok {
-			replay = append(replay, event)
-		}
-	}
-	return replay
-}
-
-func (p *windowsProvider) clearPendingSuppressLocked() {
-	clear(p.pendingSuppress)
-	p.pendingOrder = p.pendingOrder[:0]
-}
-
-func (p *windowsProvider) clearSuppressMismatchLocked() {
-	p.suppressMismatch = ModNone
-	p.suppressMismatchAt = time.Time{}
+func (p *windowsProvider) clearHookMismatchLocked() {
+	p.hookMismatch = ModNone
+	p.hookMismatchAt = time.Time{}
 }
 
 func (p *windowsProvider) activeModifiers(now time.Time) Modifier {
-	rawMods := windowsActiveModifiers(p.pollKeyDown)
+	physicalMods := windowsActiveModifiers(p.pollKeyDown)
 	p.hookMu.Lock()
-	reset := p.reconcileSuppressedModifiersLocked(rawMods, now, false)
+	reset := p.reconcileHookModifiersLocked(physicalMods, now, false)
 	hookMods := p.hookActiveModifiersLocked()
 	p.hookMu.Unlock()
 	if reset != ModNone {
-		p.logger.Debug("cleared stale suppressed modifier state", "mods", reset)
+		p.logger.Debug("cleared stale hook modifier state", "mods", reset)
 	}
-	return rawMods | hookMods
+	return physicalMods | hookMods
 }
 
-func (p *windowsProvider) reconcileSuppressedModifiersLocked(rawMods Modifier, now time.Time, force bool) Modifier {
-	active := p.activeSuppress
-	if active == ModNone {
-		p.clearSuppressMismatchLocked()
+func (p *windowsProvider) reconcileHookModifiersLocked(physicalMods Modifier, now time.Time, force bool) Modifier {
+	hookMods := p.hookActiveModifiersLocked()
+	if hookMods == ModNone {
+		p.clearHookMismatchLocked()
 		return ModNone
 	}
-	missing := active &^ rawMods
+	missing := hookMods &^ physicalMods
 	if missing == ModNone {
-		p.clearSuppressMismatchLocked()
+		p.clearHookMismatchLocked()
 		return ModNone
 	}
 	if !force {
-		if missing != p.suppressMismatch || p.suppressMismatchAt.IsZero() {
-			p.suppressMismatch = missing
-			p.suppressMismatchAt = now
+		if missing != p.hookMismatch || p.hookMismatchAt.IsZero() {
+			p.hookMismatch = missing
+			p.hookMismatchAt = now
 			return ModNone
 		}
-		if now.Sub(p.suppressMismatchAt) < windowsSuppressResetLag {
+		if now.Sub(p.hookMismatchAt) < windowsHookResetLag {
 			return ModNone
 		}
 	}
@@ -617,71 +480,8 @@ func (p *windowsProvider) reconcileSuppressedModifiersLocked(rawMods Modifier, n
 			delete(p.hookDown, virtualKey)
 		}
 	}
-	p.clearPendingSuppressLocked()
-	p.activeSuppress = ModNone
-	p.clearSuppressMismatchLocked()
+	p.clearHookMismatchLocked()
 	return missing
-}
-
-func replayKeyFromHook(event windowsLowLevelKeyEvent, down bool) windowsReplayKey {
-	return windowsReplayKey{
-		VirtualKey: event.VirtualKey,
-		ScanCode:   event.ScanCode,
-		Flags:      event.Flags,
-		Down:       down,
-	}
-}
-
-func replayWindowsKeys(keys []windowsReplayKey) error {
-	if len(keys) == 0 {
-		return nil
-	}
-	inputSize := 28
-	dataOffset := 4
-	extraInfoOffset := 12
-	if unsafe.Sizeof(uintptr(0)) == 8 {
-		inputSize = 40
-		dataOffset = 8
-		extraInfoOffset = 16
-	}
-	inputs := make([]byte, inputSize*len(keys))
-	for i, key := range keys {
-		flags := uint32(0)
-		if key.Flags&llkhfExtended != 0 {
-			flags |= windowsKeyEventExtended
-		}
-		if !key.Down {
-			flags |= windowsKeyEventUp
-		}
-		base := i * inputSize
-		binary.LittleEndian.PutUint32(inputs[base:], windowsInputKeyboard)
-		binary.LittleEndian.PutUint16(inputs[base+dataOffset:], uint16(key.VirtualKey))
-		binary.LittleEndian.PutUint16(inputs[base+dataOffset+2:], uint16(key.ScanCode))
-		binary.LittleEndian.PutUint32(inputs[base+dataOffset+4:], flags)
-		if unsafe.Sizeof(uintptr(0)) == 8 {
-			binary.LittleEndian.PutUint64(inputs[base+dataOffset+extraInfoOffset:], windowsReplayMarker)
-		} else {
-			binary.LittleEndian.PutUint32(inputs[base+dataOffset+extraInfoOffset:], windowsReplayMarker)
-		}
-	}
-	sent, _, err := procSendInput.Call(
-		uintptr(len(keys)), uintptr(unsafe.Pointer(&inputs[0])), uintptr(inputSize),
-	)
-	if sent != uintptr(len(keys)) {
-		return fmt.Errorf("replay Windows keys: SendInput inserted %d of %d events: %w", sent, len(keys), err)
-	}
-	return nil
-}
-
-func (p *windowsProvider) logKeyboardHookErrors(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case err := <-p.hookErrors:
-			p.logger.Warn("keyboard event replay failed", "error", err)
-		}
-	}
 }
 
 func (p *windowsProvider) logKeyboardHookEvents(ctx context.Context) {
@@ -724,9 +524,7 @@ func (p *windowsProvider) runKeyboardHook(ctx context.Context, ready chan<- erro
 		p.hook = 0
 		p.hookThreadID = 0
 		p.hookDown = make(map[uint32]bool)
-		p.clearPendingSuppressLocked()
-		p.activeSuppress = ModNone
-		p.clearSuppressMismatchLocked()
+		p.clearHookMismatchLocked()
 		p.hookMu.Unlock()
 	}()
 
@@ -774,9 +572,7 @@ func windowsLowLevelHookProc(nCode int32, wParam, lParam uintptr) uintptr {
 		provider := windowsHookProvider
 		windowsHookProviderMu.RUnlock()
 		if provider != nil {
-			if provider.recordHookEvent(*event) {
-				return 1
-			}
+			provider.recordHookEvent(*event)
 		}
 	}
 	result, _, _ := procCallNextHookEx.Call(0, uintptr(nCode), wParam, lParam)

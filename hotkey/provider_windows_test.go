@@ -11,15 +11,11 @@ import (
 )
 
 func TestWindowsProviderAppliesGlobalKeyStateEdges(t *testing.T) {
-	provider, err := NewProvider()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := provider.(*windowsProvider)
+	p := newWindowsTestProvider(t)
 	combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}
 	pressed := make(map[KeyCode]bool)
 	p.pollKeyDown = func(key KeyCode) bool { return pressed[key] }
-	ch, err := p.RegisterWithOptions(combo, RegisterOptions{Suppress: true})
+	ch, err := p.Register(combo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,13 +26,8 @@ func TestWindowsProviderAppliesGlobalKeyStateEdges(t *testing.T) {
 	p.poll(time.Now())
 	assertWindowsEvent(t, ch, combo, KeyDown)
 
-	// An unchanged polling sample must not produce key repeat events.
 	p.poll(time.Now())
-	select {
-	case event := <-ch:
-		t.Fatalf("unchanged key state was dispatched: %+v", event)
-	default:
-	}
+	assertNoWindowsEvent(t, ch)
 
 	delete(pressed, KeySuper)
 	p.poll(time.Now())
@@ -54,89 +45,113 @@ func TestWindowsModifierCombosRequireExactModifiers(t *testing.T) {
 	}
 }
 
-func TestWindowsClearsStaleSuppressedSuperBeforeAltOnlyPress(t *testing.T) {
+func TestWindowsHookTracksSystemShortcutsWithoutStuckState(t *testing.T) {
 	p := newWindowsTestProvider(t)
 	combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}
-	pressed := make(map[KeyCode]bool)
-	p.pollKeyDown = func(key KeyCode) bool { return pressed[key] }
-	ch, err := p.RegisterWithOptions(combo, RegisterOptions{Suppress: true})
-	if err != nil {
+	if _, err := p.RegisterWithOptions(combo, RegisterOptions{Suppress: true}); err != nil {
 		t.Fatal(err)
 	}
 
-	now := time.Now()
-	pressed[KeyAlt] = true
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
-	p.poll(now)
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLWin, true), true, nil)
-	p.poll(now.Add(5 * time.Millisecond))
-	assertWindowsEvent(t, ch, combo, KeyDown)
-
-	delete(pressed, KeyAlt)
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, false), true, nil)
-	// Simulate a lost Super key-up event. Once the raw keyboard state is idle,
-	// the polling loop must discard the stale hook fallback before rearming.
-	p.poll(now.Add(10 * time.Millisecond))
-	assertWindowsEvent(t, ch, combo, KeyUp)
-	p.poll(now.Add(windowsSuppressResetLag + 15*time.Millisecond))
-	if p.hookKeyDown(KeySuper) {
-		t.Fatal("stale Super hook state remained after the keyboard became idle")
+	events := []windowsLowLevelKeyEvent{
+		{VirtualKey: vkLMenu},
+		{VirtualKey: vkTab},
+		{VirtualKey: vkTab, Flags: llkhfUp},
+		{VirtualKey: vkLMenu, Flags: llkhfUp},
+		{VirtualKey: vkLWin},
+		{VirtualKey: vkLWin, Flags: llkhfUp},
 	}
-
-	pressed[KeyAlt] = true
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
-	p.poll(now.Add(windowsSuppressResetLag + 20*time.Millisecond))
-	assertNoWindowsEvent(t, ch)
+	for _, event := range events {
+		p.recordHookEvent(event)
+	}
+	if p.hookKeyDown(KeyAlt) || p.hookKeyDown(KeySuper) || p.hookKeyDown(KeyTab) {
+		t.Fatal("hook retained state after Alt, Alt+Tab, and Super key-up events")
+	}
 }
 
-func TestWindowsClearsStaleSuppressedSuperBeforeRapidAltRepress(t *testing.T) {
+func TestWindowsClearsStaleModifierBeforeOtherModifierPress(t *testing.T) {
+	tests := []struct {
+		name          string
+		staleKey      KeyCode
+		staleVK       uint32
+		standaloneKey KeyCode
+		standaloneVK  uint32
+	}{
+		{
+			name:          "Alt_then_Super",
+			staleKey:      KeyAlt,
+			staleVK:       vkLMenu,
+			standaloneKey: KeySuper,
+			standaloneVK:  vkLWin,
+		},
+		{
+			name:          "Super_then_Alt",
+			staleKey:      KeySuper,
+			staleVK:       vkLWin,
+			standaloneKey: KeyAlt,
+			standaloneVK:  vkLMenu,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p := newWindowsTestProvider(t)
+			combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}
+			pressed := make(map[KeyCode]bool)
+			p.pollKeyDown = func(key KeyCode) bool { return pressed[key] }
+			ch, err := p.RegisterWithOptions(combo, RegisterOptions{Suppress: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			pressed[test.staleKey] = true
+			p.recordHookEvent(windowsLowLevelKeyEvent{VirtualKey: test.staleVK})
+			p.poll(time.Now())
+			assertNoWindowsEvent(t, ch)
+
+			// The physical key was released, but its hook key-up was lost.
+			delete(pressed, test.staleKey)
+			pressed[test.standaloneKey] = true
+			p.recordHookEvent(windowsLowLevelKeyEvent{VirtualKey: test.standaloneVK})
+			if p.hookKeyDown(test.staleKey) {
+				t.Fatalf("stale %s hook state remained after %s was pressed", test.staleKey, test.standaloneKey)
+			}
+			p.poll(time.Now())
+			assertNoWindowsEvent(t, ch)
+		})
+	}
+}
+
+func TestWindowsClearsStaleModifierAfterPhysicalRelease(t *testing.T) {
 	p := newWindowsTestProvider(t)
 	combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}
 	pressed := make(map[KeyCode]bool)
 	p.pollKeyDown = func(key KeyCode) bool { return pressed[key] }
-	ch, err := p.RegisterWithOptions(combo, RegisterOptions{Suppress: true})
+	ch, err := p.Register(combo)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	now := time.Now()
 	pressed[KeyAlt] = true
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
-	p.poll(now)
+	p.recordHookEvent(windowsLowLevelKeyEvent{VirtualKey: vkLMenu})
 	pressed[KeySuper] = true
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLWin, true), true, nil)
-	p.poll(now.Add(5 * time.Millisecond))
+	p.recordHookEvent(windowsLowLevelKeyEvent{VirtualKey: vkLWin})
+	p.poll(now)
 	assertWindowsEvent(t, ch, combo, KeyDown)
 
 	delete(pressed, KeyAlt)
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, false), true, nil)
-	delete(pressed, KeySuper) // Simulate the physical release with a lost hook key-up.
-
-	// Press Alt again before polling has observed an idle keyboard. The new
-	// press must start a fresh suppression candidate instead of combining with
-	// the stale Super state.
-	pressed[KeyAlt] = true
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
-	if p.hookKeyDown(KeySuper) {
-		t.Fatal("stale Super hook state remained when Alt began a new press")
-	}
-	p.poll(now.Add(10 * time.Millisecond))
+	p.recordHookEvent(windowsLowLevelKeyEvent{VirtualKey: vkLMenu, Flags: llkhfUp})
+	delete(pressed, KeySuper) // Simulate a lost Super hook key-up.
+	p.poll(now.Add(windowsPollInterval))
 	assertWindowsEvent(t, ch, combo, KeyUp)
-	assertNoWindowsEvent(t, ch)
-
-	delete(pressed, KeyAlt)
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, false), true, []windowsReplayKey{
-		{VirtualKey: vkLMenu, Down: true},
-		{VirtualKey: vkLMenu, Down: false},
-	})
+	p.poll(now.Add(windowsHookResetLag + 2*windowsPollInterval))
+	if p.hookKeyDown(KeySuper) {
+		t.Fatal("stale Super hook state remained after the physical release")
+	}
 }
 
 func TestWindowsProviderUsesHookStateWhenPollingMissesSuper(t *testing.T) {
-	provider, err := NewProvider()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := provider.(*windowsProvider)
+	p := newWindowsTestProvider(t)
 	p.pollKeyDown = func(KeyCode) bool { return false }
 
 	p.setHookVirtualKey(vkLWin, true)
@@ -154,56 +169,20 @@ func TestWindowsProviderUsesHookStateWhenPollingMissesSuper(t *testing.T) {
 	}
 }
 
-func TestWindowsSuppressesModifierOnlyComboEdges(t *testing.T) {
+func TestWindowsProviderDoesNotUseHookFallbackForRegularKeys(t *testing.T) {
 	p := newWindowsTestProvider(t)
-	combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}
-	p.suppressCombos[combo] = struct{}{}
-
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLWin, true), true, nil)
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLWin, false), true, nil)
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, false), true, nil)
-	if p.activeSuppress != ModNone {
-		t.Fatalf("active suppression remained after release: %s", p.activeSuppress)
+	p.pollKeyDown = func(KeyCode) bool { return false }
+	p.setHookVirtualKey(vkF9, true)
+	if p.combinedKeyDown(KeyF9) {
+		t.Fatal("regular key used stale low-level hook state as an active key")
 	}
 }
 
-func TestWindowsReplaysSinglePendingModifier(t *testing.T) {
-	p := newWindowsTestProvider(t)
-	p.suppressCombos[Combo{Mods: ModAlt | ModSuper, Key: KeyNone}] = struct{}{}
-
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
-	decision := applyWindowsHookEvent(p, vkLMenu, false)
-	assertHookDecision(t, decision, true, []windowsReplayKey{
-		{VirtualKey: vkLMenu, Down: true},
-		{VirtualKey: vkLMenu, Down: false},
-	})
-}
-
-func TestWindowsReplaysPendingModifierBeforeOtherKey(t *testing.T) {
-	p := newWindowsTestProvider(t)
-	p.suppressCombos[Combo{Mods: ModAlt | ModSuper, Key: KeyNone}] = struct{}{}
-
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, true), true, nil)
-	decision := applyWindowsHookEvent(p, vkTab, true)
-	assertHookDecision(t, decision, true, []windowsReplayKey{
-		{VirtualKey: vkLMenu, Down: true},
-		{VirtualKey: vkTab, Down: true},
-	})
-	assertHookDecision(t, applyWindowsHookEvent(p, vkTab, false), false, nil)
-	assertHookDecision(t, applyWindowsHookEvent(p, vkLMenu, false), false, nil)
-}
-
-func TestWindowsHookFallbackIntegration(t *testing.T) {
+func TestWindowsHookIntegration(t *testing.T) {
 	if os.Getenv("JUST_TALK_TEST_WINDOWS_HOTKEY") == "" {
 		t.Skip("set JUST_TALK_TEST_WINDOWS_HOTKEY=1 to test the low-level keyboard hook")
 	}
-	provider, err := NewProvider()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := provider.(*windowsProvider)
-	p.pollKeyDown = func(KeyCode) bool { return false }
+	p := newWindowsTestProvider(t)
 	combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}
 	ch, err := p.RegisterWithOptions(combo, RegisterOptions{Suppress: true})
 	if err != nil {
@@ -217,6 +196,8 @@ func TestWindowsHookFallbackIntegration(t *testing.T) {
 	defer func() {
 		keybdEvent.Call(vkLWin, 0, 2, 0)
 		keybdEvent.Call(vkLMenu, 0, 2, 0)
+		keybdEvent.Call(vkEscape, 0, 0, 0)
+		keybdEvent.Call(vkEscape, 0, 2, 0)
 		if stopped {
 			return
 		}
@@ -229,7 +210,7 @@ func TestWindowsHookFallbackIntegration(t *testing.T) {
 	go func() { startDone <- p.Start(ctx) }()
 	time.Sleep(250 * time.Millisecond)
 
-	for cycle := 0; cycle < 2; cycle++ {
+	for cycle := 0; cycle < 3; cycle++ {
 		keybdEvent.Call(vkLMenu, 0, 0, 0)
 		time.Sleep(30 * time.Millisecond)
 		keybdEvent.Call(vkLWin, 0, 0, 0)
@@ -237,13 +218,14 @@ func TestWindowsHookFallbackIntegration(t *testing.T) {
 		keybdEvent.Call(vkLWin, 0, 2, 0)
 		keybdEvent.Call(vkLMenu, 0, 2, 0)
 		assertWindowsEventWithin(t, ch, combo, KeyUp, 2*time.Second)
+
 		keybdEvent.Call(vkLMenu, 0, 0, 0)
 		keybdEvent.Call(vkLMenu, 0, 2, 0)
-		assertNoWindowsEventWithin(t, ch, 150*time.Millisecond)
-		time.Sleep(50 * time.Millisecond)
+		assertNoWindowsEventWithin(t, ch, 100*time.Millisecond)
+		keybdEvent.Call(vkLWin, 0, 0, 0)
+		keybdEvent.Call(vkLWin, 0, 2, 0)
+		assertNoWindowsEventWithin(t, ch, 100*time.Millisecond)
 	}
-	keybdEvent.Call(vkEscape, 0, 0, 0)
-	keybdEvent.Call(vkEscape, 0, 2, 0)
 
 	cancel()
 	select {
@@ -306,36 +288,4 @@ func newWindowsTestProvider(t *testing.T) *windowsProvider {
 		t.Fatal(err)
 	}
 	return provider.(*windowsProvider)
-}
-
-func applyWindowsHookEvent(p *windowsProvider, virtualKey uint32, down bool) windowsHookDecision {
-	event := windowsLowLevelKeyEvent{VirtualKey: virtualKey}
-	if !down {
-		event.Flags = llkhfUp
-	}
-	p.hookMu.Lock()
-	wasDown := p.hookDown[virtualKey]
-	if down {
-		p.hookDown[virtualKey] = true
-	} else {
-		delete(p.hookDown, virtualKey)
-	}
-	decision := p.suppressionDecisionLocked(event, down, wasDown)
-	p.hookMu.Unlock()
-	return decision
-}
-
-func assertHookDecision(t *testing.T, got windowsHookDecision, suppress bool, replay []windowsReplayKey) {
-	t.Helper()
-	if got.Suppress != suppress {
-		t.Fatalf("Suppress = %v, want %v", got.Suppress, suppress)
-	}
-	if len(got.Replay) != len(replay) {
-		t.Fatalf("Replay = %+v, want %+v", got.Replay, replay)
-	}
-	for i := range replay {
-		if got.Replay[i].VirtualKey != replay[i].VirtualKey || got.Replay[i].Down != replay[i].Down {
-			t.Fatalf("Replay[%d] = %+v, want %+v", i, got.Replay[i], replay[i])
-		}
-	}
 }
