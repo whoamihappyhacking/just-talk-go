@@ -1,6 +1,6 @@
 # Just Talk
 
-[中文](README.md)
+[中文](README.md) · [Website](https://whoamihappyhacking.github.io/just-talk-go/)
 
 Just Talk is a desktop voice input tool. It records audio with a global hotkey, sends it to streaming ASR, and then copies the recognized text to the clipboard or submits it directly into the focused input field.
 
@@ -196,3 +196,13 @@ This project does not accept pull requests. Issues are welcome for bug reports, 
 ## License
 
 Just Talk is licensed under the GNU General Public License v3.0.
+
+## Project website
+
+Visit the [Just Talk website](https://whoamihappyhacking.github.io/just-talk-go/). GitHub Actions automatically deploys updates to `website/` pushed to `master`.
+
+The static introduction in `website/` includes features, platform support, quick-start instructions, and a simulated demo that does not use the microphone. Preview it with:
+
+```bash
+python3 -m http.server 7788 --bind 0.0.0.0 --directory website
+```

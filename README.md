@@ -1,6 +1,6 @@
 # Just Talk
 
-[English](README.en.md)
+[English](README.en.md) · [项目主页](https://whoamihappyhacking.github.io/just-talk-go/)
 
 减少用键盘的次数，改用口喷吧。
 
@@ -196,3 +196,13 @@ Just Talk 由 `whoamihappyhacking` 维护。
 ## 许可证
 
 Just Talk 使用 GNU General Public License v3.0 开源。
+
+## 项目介绍网页
+
+在线访问：[Just Talk 项目介绍页](https://whoamihappyhacking.github.io/just-talk-go/)。推送 `website/` 更新到 `master` 后，GitHub Actions 会自动部署到 GitHub Pages。
+
+静态介绍页位于 `website/`，包含功能、平台支持、快速开始与不调用麦克风的交互演示。启动预览：
+
+```bash
+python3 -m http.server 7788 --bind 0.0.0.0 --directory website
+```
