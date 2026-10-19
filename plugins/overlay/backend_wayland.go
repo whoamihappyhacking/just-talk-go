@@ -15,6 +15,7 @@ package overlay
 extern void goOverlayRegistryGlobal(uintptr_t handle, struct wl_registry *registry, uint32_t name, char *interface, uint32_t version);
 extern void goOverlayLayerConfigure(uintptr_t handle, struct zwlr_layer_surface_v1 *surface, uint32_t serial, uint32_t width, uint32_t height);
 extern void goOverlayLayerClosed(uintptr_t handle, struct zwlr_layer_surface_v1 *surface);
+extern void goOverlayOutputScale(uintptr_t handle, int32_t factor);
 
 static void registry_global_cb(void *data, struct wl_registry *registry, uint32_t name, const char *interface, uint32_t version) {
 	goOverlayRegistryGlobal((uintptr_t)data, registry, name, (char*)interface, version);
@@ -63,6 +64,37 @@ static void *bind_layer_shell(struct wl_registry *registry, uint32_t name, uint3
 	if (version > 4) version = 4;
 	return wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface, version);
 }
+
+// The compositor reports each output's scale; the largest one decides the
+// buffer resolution so the pill stays sharp wherever it is shown.
+static void output_geometry_cb(void *data, struct wl_output *output, int32_t x, int32_t y,
+		int32_t pw, int32_t ph, int32_t subpixel, const char *make, const char *model, int32_t transform) {
+}
+
+static void output_mode_cb(void *data, struct wl_output *output, uint32_t flags,
+		int32_t width, int32_t height, int32_t refresh) {
+}
+
+static void output_done_cb(void *data, struct wl_output *output) {
+}
+
+static void output_scale_cb(void *data, struct wl_output *output, int32_t factor) {
+	goOverlayOutputScale((uintptr_t)data, factor);
+}
+
+static const struct wl_output_listener output_listener = {
+	.geometry = output_geometry_cb,
+	.mode = output_mode_cb,
+	.done = output_done_cb,
+	.scale = output_scale_cb,
+};
+
+static void *bind_wl_output(struct wl_registry *registry, uint32_t name, uint32_t version, uintptr_t handle) {
+	if (version > 2) version = 2;
+	struct wl_output *output = wl_registry_bind(registry, name, &wl_output_interface, version);
+	if (output && version >= 2) wl_output_add_listener(output, &output_listener, (void*)handle);
+	return output;
+}
 */
 import "C"
 
@@ -98,9 +130,20 @@ type waylandBackend struct {
 	visible      bool
 	position     string
 	scale        float64
-	w            int
-	h            int
-	margin       int
+	// Surface size in logical pixels, and the pixel buffer behind it. They
+	// differ by bufferScale on a HiDPI output; without that split the
+	// compositor upscales a low-resolution buffer and the pill looks blurry.
+	logicalW    int
+	logicalH    int
+	bufferScale int
+	w           int
+	h           int
+	margin      int
+}
+
+// pixelScale is how many buffer pixels the capsule gets per design pixel.
+func (b *waylandBackend) pixelScale() float64 {
+	return b.scale * float64(b.bufferScale)
 }
 
 func newWaylandBackend(cfg config.OverlayConfig) (backend, error) {
@@ -112,9 +155,9 @@ func newWaylandBackend(cfg config.OverlayConfig) (backend, error) {
 	if scale <= 0 {
 		scale = 1.0
 	}
-	b := &waylandBackend{display: display, position: cfg.Position, scale: scale}
-	b.w = b.scaled(basePillW)
-	b.h = b.scaled(basePillH)
+	b := &waylandBackend{display: display, position: cfg.Position, scale: scale, bufferScale: 1}
+	b.logicalW = b.scaled(basePillW)
+	b.logicalH = b.scaled(basePillH)
 	b.margin = b.scaled(baseMargin)
 	if b.position == "" {
 		b.position = "top-right"
@@ -135,6 +178,11 @@ func newWaylandBackend(cfg config.OverlayConfig) (backend, error) {
 		b.Close()
 		return nil, fmt.Errorf("wlr-layer-shell protocol is not supported by this compositor")
 	}
+	// Output scale events only arrive after wl_output is bound, so the first
+	// roundtrip delivers the globals and this one delivers their scales.
+	C.wl_display_roundtrip(display)
+	b.w = b.logicalW * b.bufferScale
+	b.h = b.logicalH * b.bufferScale
 	if err := b.createSurface(); err != nil {
 		b.Close()
 		return nil, err
@@ -253,7 +301,8 @@ func (b *waylandBackend) createSurface() error {
 		return fmt.Errorf("cannot create layer-shell surface")
 	}
 	C.add_layer_surface_listener(b.layerSurface, C.uintptr_t(b.handle))
-	C.zwlr_layer_surface_v1_set_size(b.layerSurface, C.uint32_t(b.w), C.uint32_t(b.h))
+	C.wl_surface_set_buffer_scale(b.surface, C.int32_t(b.bufferScale))
+	C.zwlr_layer_surface_v1_set_size(b.layerSurface, C.uint32_t(b.logicalW), C.uint32_t(b.logicalH))
 	C.zwlr_layer_surface_v1_set_anchor(b.layerSurface, C.uint32_t(b.anchor()))
 	top, right, bottom, left := b.margins()
 	C.zwlr_layer_surface_v1_set_margin(b.layerSurface, C.int32_t(top), C.int32_t(right), C.int32_t(bottom), C.int32_t(left))
@@ -300,111 +349,13 @@ func (b *waylandBackend) createBuffer() error {
 }
 
 func (b *waylandBackend) draw(label string, color statusColor) {
-	clear(b.data)
-	bg := rgba{20, 20, 20, 215}
-	fg := rgba{245, 245, 245, 255}
 	dot := rgba{uint8(color.R >> 8), uint8(color.G >> 8), uint8(color.B >> 8), 255}
-	radius := b.h / 2
-	for y := 0; y < b.h; y++ {
-		for x := 0; x < b.w; x++ {
-			if coverage := waylandRoundedRectCoverage(x, y, b.w, b.h, radius); coverage > 0 {
-				c := bg
-				c.a = uint8(uint16(c.a) * uint16(coverage) / 255)
-				b.setPixel(x, y, c)
-			}
-		}
-	}
-	dotSize := b.scaled(14)
-	gap := b.scaled(14)
-	textScale := b.scaled(3)
-	textW := bitmapTextWidth(label, textScale)
-	contentW := dotSize + gap + textW
-	dotX := (b.w - contentW) / 2
-	if dotX < 0 {
-		dotX = 0
-	}
-	dotY := (b.h - dotSize) / 2
-	b.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
-	textH := 7 * textScale
-	textX := dotX + dotSize + gap
-	textY := (b.h - textH) / 2
-	if maxX := b.w - b.scaled(14) - textW; textX > maxX {
-		textX = maxX
-	}
-	b.drawText(textX, textY, label, textScale, fg)
+	canvas := &argbCanvas{w: b.w, h: b.h, data: b.data}
+	renderCapsule(canvas, b.w, b.h, label, dot)
 }
 
 type rgba struct {
 	r, g, b, a uint8
-}
-
-func (b *waylandBackend) setPixel(x, y int, c rgba) {
-	if x < 0 || y < 0 || x >= b.w || y >= b.h {
-		return
-	}
-	i := (y*b.w + x) * 4
-	a := uint16(c.a)
-	b.data[i+0] = uint8(uint16(c.b) * a / 255)
-	b.data[i+1] = uint8(uint16(c.g) * a / 255)
-	b.data[i+2] = uint8(uint16(c.r) * a / 255)
-	b.data[i+3] = c.a
-}
-
-func (b *waylandBackend) blendPixel(x, y int, c rgba, coverage uint8) {
-	if x < 0 || y < 0 || x >= b.w || y >= b.h || coverage == 0 {
-		return
-	}
-	i := (y*b.w + x) * 4
-	a := uint16(coverage)
-	inv := uint16(255 - coverage)
-	b.data[i+0] = uint8((uint16(c.b)*a + uint16(b.data[i+0])*inv) / 255)
-	b.data[i+1] = uint8((uint16(c.g)*a + uint16(b.data[i+1])*inv) / 255)
-	b.data[i+2] = uint8((uint16(c.r)*a + uint16(b.data[i+2])*inv) / 255)
-	b.data[i+3] = 255
-}
-
-func (b *waylandBackend) fillCircleAA(cx, cy, r int, c rgba) {
-	rr := r * r * 16
-	for y := cy - r; y <= cy+r; y++ {
-		for x := cx - r; x <= cx+r; x++ {
-			inside := 0
-			for sy := 0; sy < 4; sy++ {
-				for sx := 0; sx < 4; sx++ {
-					dx := (x-cx)*4 + sx - 1
-					dy := (y-cy)*4 + sy - 1
-					if dx*dx+dy*dy <= rr {
-						inside++
-					}
-				}
-			}
-			if inside > 0 {
-				b.blendPixel(x, y, c, uint8(inside*255/16))
-			}
-		}
-	}
-}
-
-func (b *waylandBackend) drawText(x, y int, s string, scale int, c rgba) {
-	for _, r := range strings.ToUpper(s) {
-		glyph, ok := glyphs[r]
-		if !ok {
-			x += 4 * scale
-			continue
-		}
-		for row, bits := range glyph {
-			for col := 0; col < 5; col++ {
-				if bits&(1<<(4-col)) == 0 {
-					continue
-				}
-				for yy := 0; yy < scale; yy++ {
-					for xx := 0; xx < scale; xx++ {
-						b.setPixel(x+col*scale+xx, y+row*scale+yy, c)
-					}
-				}
-			}
-		}
-		x += 6 * scale
-	}
 }
 
 func (b *waylandBackend) anchor() int {
@@ -449,35 +400,6 @@ func (b *waylandBackend) scaled(v int) int {
 	return n
 }
 
-func waylandRoundedRectCoverage(x, y, w, h, r int) uint8 {
-	inside := 0
-	const samples = 8
-	for sy := 0; sy < samples; sy++ {
-		for sx := 0; sx < samples; sx++ {
-			if insideWaylandRoundedRectSample(x*samples+sx, y*samples+sy, w*samples, h*samples, r*samples) {
-				inside++
-			}
-		}
-	}
-	return uint8(inside * 255 / (samples * samples))
-}
-
-func insideWaylandRoundedRectSample(x, y, w, h, r int) bool {
-	if x >= r && x < w-r {
-		return true
-	}
-	cx := r
-	if x >= w-r {
-		cx = w - r - 1
-	}
-	cy := r
-	if y >= h/2 {
-		cy = h - r - 1
-	}
-	dx, dy := x-cx, y-cy
-	return dx*dx+dy*dy <= r*r
-}
-
 //export goOverlayRegistryGlobal
 func goOverlayRegistryGlobal(handle C.uintptr_t, registry *C.struct_wl_registry, name C.uint32_t, iface *C.char, version C.uint32_t) {
 	h := cgo.Handle(handle)
@@ -492,6 +414,21 @@ func goOverlayRegistryGlobal(handle C.uintptr_t, registry *C.struct_wl_registry,
 		b.shm = (*C.struct_wl_shm)(C.bind_wl_shm(registry, name, version))
 	case "zwlr_layer_shell_v1":
 		b.layerShell = (*C.struct_zwlr_layer_shell_v1)(C.bind_layer_shell(registry, name, version))
+	case "wl_output":
+		C.bind_wl_output(registry, name, version, C.uintptr_t(handle))
+	}
+}
+
+//export goOverlayOutputScale
+func goOverlayOutputScale(handle C.uintptr_t, factor C.int32_t) {
+	b, ok := cgo.Handle(handle).Value().(*waylandBackend)
+	if !ok || factor < 1 {
+		return
+	}
+	// Taking the largest scale keeps the pill sharp on a mixed-DPI setup; a
+	// buffer with more detail than an output needs only costs downscaling.
+	if int(factor) > b.bufferScale {
+		b.bufferScale = int(factor)
 	}
 }
 

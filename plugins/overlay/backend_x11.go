@@ -109,8 +109,8 @@ import (
 )
 
 const (
-	basePillW  = 122
-	basePillH  = 42
+	basePillW  = 96
+	basePillH  = 32
 	baseMargin = 28
 )
 
@@ -290,37 +290,8 @@ func (b *x11Backend) draw(label string, color statusColor) {
 		return
 	}
 	p := newARGBCanvas(b.w, b.h)
-	bg := rgba{20, 20, 20, 215}
-	fg := rgba{245, 245, 245, 255}
 	dot := rgba{uint8(color.R >> 8), uint8(color.G >> 8), uint8(color.B >> 8), 255}
-	radius := b.h / 2
-	for y := 0; y < b.h; y++ {
-		for x := 0; x < b.w; x++ {
-			if coverage := roundedRectCoverage(x, y, b.w, b.h, radius); coverage > 0 {
-				c := bg
-				c.a = uint8(uint16(c.a) * uint16(coverage) / 255)
-				p.setPixel(x, y, c)
-			}
-		}
-	}
-	dotSize := b.scaled(14)
-	gap := b.scaled(14)
-	textScale := b.scaled(3)
-	textW := bitmapTextWidth(label, textScale)
-	contentW := dotSize + gap + textW
-	dotX := (b.w - contentW) / 2
-	if dotX < 0 {
-		dotX = 0
-	}
-	dotY := (b.h - dotSize) / 2
-	p.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
-	textH := 7 * textScale
-	textX := dotX + dotSize + gap
-	textY := (b.h - textH) / 2
-	if maxX := b.w - b.scaled(14) - textW; textX > maxX {
-		textX = maxX
-	}
-	p.drawText(textX, textY, label, textScale, fg)
+	renderCapsule(p, b.w, b.h, label, dot)
 	b.putImage(p.data)
 }
 
@@ -452,29 +423,6 @@ func (p *argbCanvas) fillCircleAA(cx, cy, r int, c rgba) {
 				p.blendPixel(x, y, c, uint8(inside*255/16))
 			}
 		}
-	}
-}
-
-func (p *argbCanvas) drawText(x, y int, s string, scale int, c rgba) {
-	for _, r := range strings.ToUpper(s) {
-		glyph, ok := glyphs[r]
-		if !ok {
-			x += 4 * scale
-			continue
-		}
-		for row, bits := range glyph {
-			for col := 0; col < 5; col++ {
-				if bits&(1<<(4-col)) == 0 {
-					continue
-				}
-				for yy := 0; yy < scale; yy++ {
-					for xx := 0; xx < scale; xx++ {
-						p.setPixel(x+col*scale+xx, y+row*scale+yy, c)
-					}
-				}
-			}
-		}
-		x += 6 * scale
 	}
 }
 

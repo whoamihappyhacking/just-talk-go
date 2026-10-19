@@ -94,6 +94,10 @@ func (p *Plugin) sync(status voice.TUIVoiceStatus) {
 
 func displayForStatus(status voice.TUIVoiceStatus, idleVisible bool) (string, statusColor, bool) {
 	switch status.State {
+	// Short codes keep the capsule small; the dot's colour carries the
+	// urgency and the TUI carries the wording.
+	case "waiting_retry":
+		return "R?", statusColor{R: 245 << 8, G: 190 << 8, B: 70 << 8}, true
 	case "connecting":
 		return "CON", statusColor{R: 245 << 8, G: 190 << 8, B: 70 << 8}, true
 	case "recording":
