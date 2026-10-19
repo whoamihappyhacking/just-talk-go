@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "justtalk.voice",
+  "name": "Just Talk",
+  "version": "0.1.0",
+  "author": "Just Talk",
+  "description": "Voice input recording state from Just Talk",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Just Talk",
+    "description": "Voice input recording state",
+    "category": "Audio",
+    "allowMultiple": false
+  }
+}
