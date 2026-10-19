@@ -4,8 +4,27 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- Classify ASR server error responses: codes that reject the request itself (`45xxxxxx`) skip the reconnect ladder and wait for an explicit retry, while server-side faults (`55xxxxxx`) and the upload-stall timeout still reconnect. Replaying a whole recording is the most expensive thing a weak link does, so a request the server already refused no longer costs three replays.
+- Document what `voice.save_traffic` really is: a transport switch, not a bandwidth optimization. Whole-file mode sends about 33% more bytes as Base64 but never replays the recording after a dropped connection; the README and the TUI help now say so instead of implying savings.
+- Fix a blurry recording capsule on HiDPI Wayland outputs. The layer surface never set a buffer scale, so a logical-resolution buffer was upscaled by the compositor. The surface now keeps its logical size while the pixel buffer follows the output scale.
+- Redraw the recording capsule with antialiased text instead of a 5x7 bitmap font scaled by whole numbers, and shrink it from 150x42 to 70x24 logical pixels with no border: a status dot and a short code. Both Linux backends share one renderer.
+- Report a silent recording as a microphone problem instead of an ASR failure. When the service returns no text, the cached audio's peak amplitude decides the message, so a muted or wrongly routed input device no longer reads as "ASR 未返回有效文字".
+- Add a `--doctor` microphone check that records briefly and reports the captured peak, with a platform-specific command for unmuting the input device.
+- Surface ASR server error responses immediately with their code and message. Previously an error frame was silently discarded, the final-result signal never arrived, and the session waited out the full 30-second timeout before reporting an unrelated cause.
+- Add an opt-in `status_file` section that publishes recording state as JSON under `$XDG_RUNTIME_DIR/just-talk/status.json` for external status bars, plus an Omarchy Quickshell bar widget in `integrations/omarchy/` that renders it. The file is removed on exit so a widget can tell "not running" from "idle".
+
 - Fix TUI configuration reloads retaining old ASR credentials: after saving with `s`, the next recording uses the updated App Key and Access Key without restarting.
+- Add an opt-in “省流量” / `voice.save_traffic` switch (off by default). When enabled, cache locally until recording stops, then submit a complete WAV as Base64 in one synchronous Flash HTTP request using the separately enabled `volc.bigasr.auc_turbo` resource. Keep the original WebSocket mode, pin the mode per recording, bound uploads/results/timeouts, reject redirects, retain failed/silent/empty results for explicit R-triggered retry, and do not automatically resubmit potentially billable file requests. This is a transport-mode switch, not a bandwidth-savings guarantee; cache remains memory-only.
+- Treat WebSocket sessions with no recognized text as retryable through R instead of silently completing and releasing their recordings.
+
+- Raise the ASR WebSocket response limit from 32 KiB to a bounded 8 MiB so large transcripts with utterance metadata do not disconnect before the final result or repeatedly fail on retry.
+
+- Tolerate stalled audio writes for 15 seconds and final responses for 30 seconds, retain transport errors, reject premature final results, and keep slow UI consumers from blocking ASR reception. Drain buffered Linux/macOS recorder audio before closing the read pipe.
+
 - Add a responsive Chinese project introduction website with a simulated recording and R-triggered retry demo, platform-specific launch commands, static HTTP preview on port 7788, and automated GitHub Pages deployment linked from both READMEs.
+
+- Cache recording audio in memory independently of ASR connections and automatically reconnect after connection, send, or final-result failures with 1/2/4-second backoff (three retries), replaying the complete recording on a fresh connection. Retain audio for R-triggered recovery if automatic attempts are exhausted, and skip automatic retries for non-transient HTTP client errors. Keep recognized text for R-triggered output retries, show recovery status in the TUI/overlay, and cancel pending recovery on Esc or shutdown.
+- Require a final ASR response before dispatching text, preserve recordings stopped during connection setup, and measure recording duration from audio rather than network/retry wait time.
 
 ## v0.0.3 - 2026-07-29
 
