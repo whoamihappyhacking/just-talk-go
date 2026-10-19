@@ -75,6 +75,7 @@ func New(cfg *config.Config) *Model {
 		{label: "App Key", key: "app_key", help: "火山 App ID", fType: fString, input: ti(vc.AppKey)},
 		{label: "Access Key", key: "access_key", help: "火山 Access Token", fType: fString, input: ti(vc.AccessKey)},
 		{label: "自动上屏", key: "auto_submit", help: "识别后自动粘贴", fType: fToggle, boolVal: vc.AutoSubmit},
+		{label: "省流量", key: "save_traffic", help: "传输方式开关，非流量优化。开=停止后整段 HTTP（Base64 约大 33%，但断线不会重传整段），关=实时 WebSocket（更省流量，但重连要从头重发）；需开通 auc_turbo；下次录音生效", fType: fToggle, boolVal: vc.SaveTraffic},
 		{label: "停止延迟(ms)", key: "stop_delay_ms", help: "松手后补录毫秒", fType: fString, input: ti(fmt.Sprintf("%d", vc.StopDelayMs))},
 		{label: "热词", key: "hotwords", help: "逗号分隔术语", fType: fString, input: ti(strings.Join(vc.Hotwords, ", "))},
 	}
@@ -225,6 +226,8 @@ func (m *Model) save() {
 			vc.AccessKey = f.input.Value()
 		case "auto_submit":
 			vc.AutoSubmit = f.boolVal
+		case "save_traffic":
+			vc.SaveTraffic = f.boolVal
 		case "stop_delay_ms":
 			fmt.Sscanf(f.input.Value(), "%d", &vc.StopDelayMs)
 		case "hotwords":
@@ -375,6 +378,8 @@ func (m *Model) renderVoiceStatus() string {
 	label := "待机"
 	style := dStyle
 	switch status.State {
+	case "waiting_retry":
+		label, style = "等待 R 重试", wStyle
 	case "connecting":
 		label, style = "连接中", wStyle
 	case "recording":

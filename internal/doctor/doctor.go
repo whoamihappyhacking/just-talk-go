@@ -32,7 +32,11 @@ type Report struct {
 }
 
 func Run(cfg *config.Config, backend string) Report {
-	return runPlatform(cfg, backend)
+	report := runPlatform(cfg, backend)
+	if cfg.Voice.Enabled {
+		report.Checks = append(report.Checks, microphoneCheck(cfg))
+	}
+	return report
 }
 
 func (r Report) Healthy() bool {

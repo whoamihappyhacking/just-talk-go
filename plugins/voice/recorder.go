@@ -96,12 +96,16 @@ func (r *Recorder) Stop() ([]byte, error) {
 	stopFunc := r.stopFunc
 	stdout := r.stdout
 	r.stopFunc = nil
-	r.stdout = nil
 	r.mu.Unlock()
 
+	// Keep capture draining while native shutdown waits for callbacks. A
+	// callback may itself be waiting for space in the audio pipe.
 	if stopFunc != nil {
 		_ = stopFunc()
 	}
+	r.mu.Lock()
+	r.stdout = nil
+	r.mu.Unlock()
 
 	r.readMu.Lock()
 	defer r.readMu.Unlock()
@@ -122,6 +126,9 @@ func (r *Recorder) Stop() ([]byte, error) {
 		}
 	}
 
+	if stdout != nil {
+		_ = stdout.Close()
+	}
 	remaining := r.drainBuf.Bytes()
 	r.drainBuf.Reset()
 	r.logger.Info("recording stopped", "remaining_bytes", len(remaining))

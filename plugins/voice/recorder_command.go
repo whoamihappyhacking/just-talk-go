@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 )
 
@@ -32,16 +33,27 @@ func startCommandCapture(logger *slog.Logger, device string) (io.ReadCloser, str
 	if err != nil {
 		return nil, "", nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	return startCaptureCommand(logger, cmd, name)
+}
+
+func startCaptureCommand(logger *slog.Logger, cmd *exec.Cmd, name string) (io.ReadCloser, string, func() error, error) {
+	// Own the read end: exec.Cmd.Wait closes StdoutPipe before Recorder.Stop
+	// can drain its buffered tail. Network buffering makes that tail matter.
+	stdout, writer, err := os.Pipe()
 	if err != nil {
 		return nil, "", nil, err
 	}
+	cmd.Stdout = writer
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
+		_ = writer.Close()
+		_ = stdout.Close()
 		logger.Error("recorder start failed", "backend", name, "error", err, "stderr", stderrBuf.String())
 		return nil, "", nil, err
 	}
+	// The child owns its copy of the write end. EOF follows capture shutdown.
+	_ = writer.Close()
 	stop := func() error {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()

@@ -23,11 +23,16 @@ func (r *darwinAudioReadCloser) Read(p []byte) (int, error) {
 	return r.file.Read(p)
 }
 
-func (r *darwinAudioReadCloser) Close() error {
+func (r *darwinAudioReadCloser) stopCapture() error {
 	if r.rec != nil {
 		C.jt_audio_stop(r.rec)
 		r.rec = nil
 	}
+	return nil
+}
+
+func (r *darwinAudioReadCloser) Close() error {
+	_ = r.stopCapture()
 	if r.file != nil {
 		return r.file.Close()
 	}
@@ -59,7 +64,8 @@ func startCaptureWithDevice(logger *slog.Logger, device string) (io.ReadCloser, 
 	}
 
 	closer := &darwinAudioReadCloser{file: readFile, rec: rec}
-	stop := func() error { return closer.Close() }
+	// Stop capture first; Recorder.Stop drains the pipe before closing it.
+	stop := closer.stopCapture
 	return closer, "coreaudio", stop, nil
 }
 

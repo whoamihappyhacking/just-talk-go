@@ -24,8 +24,7 @@ import (
 const (
 	defaultStopDelayMs = 800
 	errorHoldDuration  = 10 * time.Second
-	audioSendTimeout   = 3 * time.Second
-	audioDrainTimeout  = 4 * time.Second
+	audioSendTimeout   = 15 * time.Second
 )
 
 var (
@@ -255,17 +254,14 @@ type VoicePlugin struct {
 	userStopped            bool
 	stopTimer              *time.Timer
 	stopAt                 time.Time
-	startedAt              time.Time
 	sessionID              uint64
-	sessionGen             uint64
 	recorder               *Recorder
-	asrClient              *ASRClient
-	asrCancel              context.CancelFunc
-	audioDone              <-chan struct{}
+	work                   *recognitionTask
+	shutdown               bool
 	autoSubmit             bool
 	stopDelayMs            int
 	pendingDone            int
-	finishingSessions      map[uint64]struct{}
+	finishingSessions      map[uint64]*recognitionTask
 	canceledSessions       map[uint64]struct{}
 	outputSessions         map[uint64]struct{}
 	errorUntil             time.Time
@@ -279,12 +275,9 @@ type VoicePlugin struct {
 type recordingSession struct {
 	sessionID   uint64
 	recorder    *Recorder
-	asrClient   *ASRClient
-	asrCancel   context.CancelFunc
-	audioDone   <-chan struct{}
+	work        *recognitionTask
 	autoSubmit  bool
 	userStopped bool
-	startedAt   time.Time
 }
 
 func NewVoicePlugin() *VoicePlugin     { return &VoicePlugin{stopDelayMs: defaultStopDelayMs} }
@@ -311,9 +304,14 @@ func (p *VoicePlugin) Start(ctx context.Context) error {
 
 func (p *VoicePlugin) Stop() error {
 	p.mu.Lock()
+	p.shutdown = true
 	session := p.detachRecordingLocked()
 	p.trackFinishLocked(session)
-	p.publishStatusLocked()
+	for _, work := range p.finishingSessions {
+		work.cancel()
+	}
+	p.clearErrorLocked()
+	p.cleanupTransientHotkeysLocked()
 	p.mu.Unlock()
 	p.finishRecordingSession(session)
 	return nil
@@ -361,7 +359,7 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 	p.mu.Unlock()
 
 	p.logger.Info("config_reloaded", "hotkey", combo, "mode", mode,
-		"auto_submit", vc.AutoSubmit, "stop_delay_ms", vc.StopDelayMs)
+		"auto_submit", vc.AutoSubmit, "stop_delay_ms", vc.StopDelayMs, "save_traffic", vc.SaveTraffic)
 
 	if !sameRegistration {
 		isOld := oldCombo.Key != hotkey.KeyNone || oldCombo.Mods != hotkey.ModNone
@@ -453,7 +451,7 @@ func (p *VoicePlugin) handleHotkey(evt hotkey.Event) {
 		}
 		if !rec {
 			p.startRecording()
-		} else if p.stopping {
+		} else if stopping {
 			p.restartRecording()
 		} else {
 			p.startStopDelay()
@@ -521,19 +519,12 @@ func (p *VoicePlugin) markHoldReleased() {
 func (p *VoicePlugin) startRecording() {
 	p.mu.Lock()
 	p.cancelStopDelayOnlyLocked()
-	if p.recording || p.asrClient != nil {
+	if p.shutdown || p.recording || p.work != nil {
 		p.mu.Unlock()
 		pout("⚠️  已经在录音中")
 		return
 	}
 	vc := p.cfg.Voice
-	asrCfg := ASRConfig{AppKey: vc.AppKey, AccessKey: vc.AccessKey, ResourceID: vc.ResourceID, Language: vc.Language, Hotwords: vc.Hotwords}
-	if asrCfg.ResourceID == "" {
-		asrCfg.ResourceID = "volc.bigasr.sauc.duration"
-	}
-	if asrCfg.Language == "" {
-		asrCfg.Language = "zh-CN"
-	}
 	var rec *Recorder
 	if vc.Device != "" {
 		rec = NewRecorderWithDevice(p.logger, vc.Device, vc.Gain)
@@ -549,85 +540,90 @@ func (p *VoicePlugin) startRecording() {
 		return
 	}
 	pout("🎤 开始录音... (后端: %s)", rec.Backend())
-	ctx, cancel := context.WithCancel(context.Background())
+	work := newRecognitionTask()
+	work.saveTraffic = vc.SaveTraffic
 	p.sessionID++
-	p.sessionGen++
 	sessionID := p.sessionID
-	sessionGen := p.sessionGen
-	startedAt := time.Now()
 	p.recorder, p.recording, p.userStopped = rec, true, false
-	p.startedAt = startedAt
 	p.stopping = false
 	p.stopAt = time.Time{}
 	p.clearErrorLocked()
-	p.asrCancel = cancel
+	p.work = work
 	shouldStopImmediately := p.mode == "hold" && p.holdReleased
 	p.publishStatusLocked()
 	p.mu.Unlock() // Release lock before slow WebSocket dial
 
-	go p.connectASR(ctx, cancel, sessionID, sessionGen, rec, asrCfg)
+	go work.capture(rec)
+	go p.runRecognition(sessionID, work)
 	if shouldStopImmediately {
 		p.startStopDelay()
 	}
 }
 
-func (p *VoicePlugin) connectASR(ctx context.Context, cancel context.CancelFunc, sessionID, sessionGen uint64, rec *Recorder, asrCfg ASRConfig) {
-	client := NewASRClient(asrCfg, p.logger)
-	if err := client.Connect(ctx); err != nil {
-		wasCanceled := ctx.Err() != nil
-		cancel()
+func (p *VoicePlugin) runRecognition(sessionID uint64, work *recognitionTask) {
+	if work.saveTraffic {
+		p.runFileRecognition(sessionID, work)
+		return
+	}
+	factory := func() recognitionClient {
 		p.mu.Lock()
-		currentSession := p.sessionGen == sessionGen
-		if currentSession {
-			rec.Stop()
-			p.stopping, p.recorder, p.recording = false, nil, false
-			p.stopAt = time.Time{}
-			p.asrCancel = nil
-			if !wasCanceled {
-				p.publishErrorLocked("ASR 连接失败: "+asrConnectErrorDetail(err), sessionID)
-			} else {
-				p.publishStatusLocked()
-			}
-		}
+		vc := p.cfg.Voice
 		p.mu.Unlock()
-		if currentSession && !wasCanceled {
-			pout("❌ ASR 连接失败: %v", err)
+		cfg := ASRConfig{AppKey: vc.AppKey, AccessKey: vc.AccessKey, ResourceID: vc.ResourceID, Language: vc.Language, Hotwords: vc.Hotwords}
+		if cfg.ResourceID == "" {
+			cfg.ResourceID = "volc.bigasr.sauc.duration"
 		}
-		return
+		if cfg.Language == "" {
+			cfg.Language = "zh-CN"
+		}
+		return NewASRClient(cfg, p.logger)
 	}
-	pout("✅ ASR 已连接")
+	connected := func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		work.connected = true
+		work.recoveryDetail = ""
+		work.retryDetail = ""
+		p.publishStatusLocked()
+	}
+	failed := func(attempt int, err error) <-chan struct{} {
+		return p.setRetryStatus(sessionID, work, attempt, err)
+	}
+	recovering := func(attempt int, err error) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if work.ctx.Err() != nil {
+			return
+		}
+		work.connected = false
+		work.recoveryDetail = fmt.Sprintf("音频已缓存，正在自动重连（%d/3）", attempt)
+		p.logger.Debug("recovering ASR connection", "session", sessionID, "attempt", attempt, "error", err)
+		p.publishStatusLocked()
+	}
+	var text string
+	err := retryUntilSuccess(work.ctx, func() error {
+		var err error
+		text, err = recoverRecognition(work.ctx, work.cache, factory, connected, recovering,
+			[]time.Duration{time.Second, 2 * time.Second, 4 * time.Second})
+		return err
+	}, failed)
+	work.result <- recognitionResult{text: text, err: err}
+}
 
+func (p *VoicePlugin) setRetryStatus(sessionID uint64, work *recognitionTask, attempt int, err error) <-chan struct{} {
 	p.mu.Lock()
-	if p.sessionGen != sessionGen || !p.recording || p.recorder != rec {
-		p.mu.Unlock()
-		client.Close()
-		cancel()
-		return
+	defer p.mu.Unlock()
+	if work.ctx.Err() != nil {
+		return nil
 	}
-	audioDone := make(chan struct{})
-	p.asrClient = client
-	p.audioDone = audioDone
+	work.connected = false
+	work.recoveryDetail = ""
+	work.retryRequest = make(chan struct{})
+	work.retryDetail = fmt.Sprintf("录音已缓存，第 %d 次失败，按 R 重试，Esc 取消: %s", attempt, asrConnectErrorDetail(err))
 	p.publishStatusLocked()
-	p.mu.Unlock()
-
-	go client.ReceiveLoop(ctx)
-	go func() {
-		defer close(audioDone)
-		p.streamAudio(ctx, rec, client)
-	}()
-	go func() {
-		for result := range client.Results() {
-			if result.Error != nil {
-				pout("❌ ASR 错误: %v", result.Error)
-				continue
-			}
-			if result.IsFinal {
-				pout("\n🎤 最终: %s", result.Text)
-			} else if result.Text != "" {
-				pout("\r🎤 %s", result.Text)
-			}
-		}
-	}()
+	pout("⚠️ %s", work.retryDetail)
+	p.logger.Debug("session waiting for R", "session", sessionID, "attempt", attempt, "error", err)
+	return work.retryRequest
 }
 
 func (p *VoicePlugin) restartRecording() {
@@ -645,41 +641,61 @@ func (p *VoicePlugin) restartRecording() {
 func (p *VoicePlugin) cancelRecording() {
 	p.mu.Lock()
 	session := p.detachRecordingLocked()
-	hadError := p.lastError != "" && time.Now().Before(p.errorUntil)
+	hadError := p.lastError != ""
 	hadPending := p.pendingDone > 0
-	if hadPending {
-		if p.canceledSessions == nil {
-			p.canceledSessions = make(map[uint64]struct{})
-		}
-		for id := range p.finishingSessions {
-			p.canceledSessions[id] = struct{}{}
-		}
-		p.pendingDone = 0
+	p.trackFinishLocked(session)
+	if p.canceledSessions == nil {
+		p.canceledSessions = make(map[uint64]struct{})
 	}
+	for id, work := range p.finishingSessions {
+		p.canceledSessions[id] = struct{}{}
+		work.cancel()
+	}
+	p.pendingDone = 0
 	p.clearErrorLocked()
 	p.publishStatusLocked()
 	p.mu.Unlock()
 
 	if session != nil {
-		if session.asrCancel != nil {
-			session.asrCancel()
-		}
-		if session.recorder != nil {
-			_, _ = session.recorder.Stop()
-		}
-		if session.asrClient != nil {
-			_ = session.asrClient.Close()
-		}
-		pout("🎤 已取消本次录音")
+		go p.finishRecordingSession(session)
+		pout("🎤 已取消本次录音和待重试缓存")
 	} else if hadPending {
-		pout("🎤 已取消等待识别结果")
+		pout("🎤 已取消等待识别结果和待重试缓存")
 	} else if hadError {
-		pout("⚠️  已关闭错误状态")
+		pout("⚠️ 已关闭错误状态")
 	}
+}
+
+// retryTaskLocked selects the most recent failed session. Busy sessions cannot
+// queue presses for future failures, and one press never retries multiple sessions.
+func (p *VoicePlugin) retryTaskLocked() (uint64, *recognitionTask) {
+	var selected *recognitionTask
+	var sessionID uint64
+	for id, work := range p.finishingSessions {
+		if work.ctx.Err() == nil && work.retryRequest != nil && (selected == nil || id > sessionID) {
+			sessionID, selected = id, work
+		}
+	}
+	if p.work != nil && p.work.ctx.Err() == nil && p.work.retryRequest != nil {
+		return p.sessionID, p.work
+	}
+	return sessionID, selected
 }
 
 func (p *VoicePlugin) retryLastError() {
 	p.mu.Lock()
+	if p.shutdown {
+		p.mu.Unlock()
+		return
+	}
+	if _, work := p.retryTaskLocked(); work != nil {
+		close(work.retryRequest)
+		work.retryRequest = nil
+		work.retryDetail = ""
+		p.publishStatusLocked()
+		p.mu.Unlock()
+		return
+	}
 	if p.recording || p.stopping || p.pendingDone > 0 || p.lastError == "" || time.Now().After(p.errorUntil) {
 		p.mu.Unlock()
 		return
@@ -707,23 +723,18 @@ func (p *VoicePlugin) detachRecordingLocked() *recordingSession {
 		p.stopTimer = nil
 	}
 	p.stopAt = time.Time{}
-	if p.recorder == nil && p.asrClient == nil && p.asrCancel == nil {
+	if p.recorder == nil && p.work == nil {
 		p.recording, p.stopping, p.userStopped = false, false, false
 		return nil
 	}
 	session := &recordingSession{
 		sessionID:   p.sessionID,
 		recorder:    p.recorder,
-		asrClient:   p.asrClient,
-		asrCancel:   p.asrCancel,
-		audioDone:   p.audioDone,
+		work:        p.work,
 		autoSubmit:  p.autoSubmit,
 		userStopped: p.userStopped,
-		startedAt:   p.startedAt,
 	}
-	p.sessionGen++
-	p.recorder, p.asrClient, p.asrCancel, p.audioDone = nil, nil, nil, nil
-	p.startedAt = time.Time{}
+	p.recorder, p.work = nil, nil
 	p.recording, p.stopping, p.userStopped = false, false, false
 	p.holdReleased = false
 	return session
@@ -735,9 +746,9 @@ func (p *VoicePlugin) trackFinishLocked(session *recordingSession) {
 	}
 	p.pendingDone++
 	if p.finishingSessions == nil {
-		p.finishingSessions = make(map[uint64]struct{})
+		p.finishingSessions = make(map[uint64]*recognitionTask)
 	}
-	p.finishingSessions[session.sessionID] = struct{}{}
+	p.finishingSessions[session.sessionID] = session.work
 }
 
 func (p *VoicePlugin) finishRecordingSession(session *recordingSession) {
@@ -745,131 +756,76 @@ func (p *VoicePlugin) finishRecordingSession(session *recordingSession) {
 		return
 	}
 	defer p.recordingSessionFinished(session.sessionID)
-	pout("🎤 停止录音")
-	if session.asrClient == nil && session.asrCancel != nil {
-		session.asrCancel()
+	work := session.work
+	defer work.cancel()
+	p.logger.Debug("finish session: stopping recorder", "session", session.sessionID)
+	remaining, err := session.recorder.Stop()
+	if err != nil {
+		p.logger.Warn("stop recorder failed", "error", err)
 	}
-	var remaining []byte
-	if session.recorder != nil {
-		p.logger.Debug("finish session: stopping recorder")
-		remaining, _ = session.recorder.Stop()
-		p.logger.Debug("finish session: recorder stopped", "remaining_bytes", len(remaining))
+	// Stop waits for any in-flight Read. Wait for its cache append as well,
+	// then append the tail exactly once before marking the cache complete.
+	<-work.captureDone
+	work.cache.append(remaining)
+	work.cache.seal()
+	p.logger.Debug("finish session: recorder stopped; waiting ASR final", "session", session.sessionID, "remaining_bytes", len(remaining))
+	if !session.userStopped || work.ctx.Err() != nil {
+		return
 	}
-
-	if session.asrClient != nil {
-		audioDrained := true
-		if session.audioDone != nil {
-			p.logger.Debug("finish session: waiting audio stream drain")
-			select {
-			case <-session.audioDone:
-				p.logger.Debug("finish session: audio stream drained")
-			case <-time.After(audioDrainTimeout):
-				audioDrained = false
-				p.logger.Warn("finish session: audio stream drain timed out")
-				if !p.sessionCanceled(session.sessionID) {
-					p.publishError("停止录音超时: 等待音频发送结束超过 4s", session.sessionID)
-				}
-			}
-		}
-
-		finalSent := false
-		if audioDrained {
-			p.logger.Debug("finish session: sending final audio", "bytes", len(remaining))
-			sendCtx, sendCancel := context.WithTimeout(context.Background(), audioSendTimeout)
-			err := session.asrClient.SendAudio(sendCtx, remaining, true)
-			sendCancel()
-			if err != nil {
-				p.logger.Warn("send final audio failed", "error", err)
-				if !p.sessionCanceled(session.sessionID) {
-					p.publishError("结束识别失败: "+shortError(err), session.sessionID)
-				}
-			} else {
-				finalSent = true
-			}
-		}
-		if finalSent {
-			p.logger.Debug("finish session: waiting ASR final")
-			select {
-			case <-session.asrClient.Final():
-				p.logger.Debug("finish session: ASR final received")
-			case <-session.asrClient.Done():
-				p.logger.Debug("finish session: ASR done")
-			case <-time.After(15 * time.Second):
-				if !p.sessionCanceled(session.sessionID) {
-					pout("⚠️  识别超时")
-					p.publishError("识别超时: 等待 ASR final 超过 15s", session.sessionID)
-				}
-			}
-		}
-		if text := session.asrClient.LastText(); text != "" && session.userStopped && p.claimSessionOutput(session.sessionID) {
-			audioDuration := time.Duration(0)
-			if !session.startedAt.IsZero() {
-				audioDuration = time.Since(session.startedAt)
-			}
-			recordTUIStats(text, audioDuration)
-			p.dispatchTextOutput(text, session.autoSubmit)
-		}
-		p.logger.Debug("finish session: closing ASR client")
-		closeDone := make(chan error, 1)
-		go func() { closeDone <- session.asrClient.Close() }()
-		select {
-		case err := <-closeDone:
-			if err != nil {
-				p.logger.Debug("close ASR client failed", "error", err)
-			}
-		case <-time.After(2 * time.Second):
-			p.logger.Warn("close ASR client timed out")
-		}
-	}
-	if session.asrCancel != nil {
-		session.asrCancel()
-	}
-	p.logger.Debug("finish session: done")
-}
-
-func (p *VoicePlugin) dispatchTextOutput(text string, autoSubmit bool) {
-	go func() {
-		if autoSubmit {
-			if err := autotype.Paste(text, p.logger); err != nil {
-				pout("❌ 上屏失败: %v", err)
-			} else {
-				pout("📋 已复制到剪贴板")
-				pout("✅ 已上屏")
-			}
+	select {
+	case <-work.ctx.Done():
+		return
+	case result := <-work.result:
+		if result.err != nil || result.text == "" || !p.claimSessionOutput(session.sessionID) {
 			return
 		}
-
-		p.logger.Debug("text output: writing clipboard", "text_len", len(text))
-		if err := writeClipboard(text); err != nil {
-			pout("❌ 复制到剪贴板失败: %v", err)
-		} else {
-			pout("📋 已复制到剪贴板")
+		// Recognition is complete. Output errors retain the text and retry
+		// without reconnecting to ASR or recognizing the audio again.
+		err := retryUntilSuccess(work.ctx, func() error {
+			return p.dispatchTextOutput(result.text, session.autoSubmit)
+		}, func(attempt int, err error) <-chan struct{} {
+			return p.setRetryStatus(session.sessionID, work, attempt, err)
+		})
+		if err == nil {
+			recordTUIStats(result.text, work.cache.duration())
 		}
-	}()
+	}
+}
+
+func (p *VoicePlugin) dispatchTextOutput(text string, autoSubmit bool) error {
+	if autoSubmit {
+		p.logger.Debug("text output: auto-submit", "text_len", len(text))
+		if err := autotype.Paste(text, p.logger); err != nil {
+			return fmt.Errorf("上屏失败: %w", err)
+		}
+		pout("✅ 已上屏")
+		return nil
+	}
+	p.logger.Debug("text output: writing clipboard", "text_len", len(text))
+	if err := writeClipboard(text); err != nil {
+		return fmt.Errorf("复制到剪贴板失败: %w", err)
+	}
+	pout("📋 已复制到剪贴板")
+	return nil
 }
 
 func (p *VoicePlugin) recordingSessionFinished(sessionID uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	_, canceled := p.canceledSessions[sessionID]
 	delete(p.finishingSessions, sessionID)
 	delete(p.canceledSessions, sessionID)
-	if p.pendingDone > 0 {
+	delete(p.outputSessions, sessionID)
+	if !canceled && p.pendingDone > 0 {
 		p.pendingDone--
 	}
 	p.publishStatusLocked()
 }
 
-func (p *VoicePlugin) sessionCanceled(sessionID uint64) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	_, ok := p.canceledSessions[sessionID]
-	return ok
-}
-
 func (p *VoicePlugin) claimSessionOutput(sessionID uint64) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, canceled := p.canceledSessions[sessionID]; canceled {
+	if _, canceled := p.canceledSessions[sessionID]; p.shutdown || canceled {
 		return false
 	}
 	if p.outputSessions == nil {
@@ -883,6 +839,9 @@ func (p *VoicePlugin) claimSessionOutput(sessionID uint64) bool {
 }
 
 func (p *VoicePlugin) publishStatusLocked() {
+	if p.shutdown {
+		return
+	}
 	state, detail := "idle", "等待热键"
 	stopAt := time.Time{}
 	recording, stopping := p.recording, false
@@ -892,13 +851,27 @@ func (p *VoicePlugin) publishStatusLocked() {
 		state, detail = "stopping_delayed", "等待停止延迟"
 		stopping = true
 		stopAt = p.stopAt
-	case p.recording && p.asrClient == nil && p.asrCancel != nil:
+	case p.recording && p.work != nil && p.work.retryDetail != "":
+		state, detail = "waiting_retry", "录音中；"+p.work.retryDetail
+	case p.recording && p.work != nil && p.work.recoveryDetail != "":
+		state, detail = "connecting", "录音中；"+p.work.recoveryDetail
+	case p.recording && p.work != nil && p.work.saveTraffic:
+		state, detail = "recording", "录音中；省流量已开，停止后整段识别"
+	case p.recording && p.work != nil && !p.work.connected:
 		state, detail = "connecting", "录音中，正在连接 ASR"
 	case p.recording:
 		state, detail = "recording", "录音中"
 	case p.pendingDone > 0:
 		state, detail = "stopping", "正在停止并等待识别结果"
 		stopping = true
+		for _, work := range p.finishingSessions {
+			if work.ctx.Err() == nil && work.recoveryDetail != "" {
+				detail = work.recoveryDetail
+			}
+		}
+		if _, work := p.retryTaskLocked(); work != nil {
+			state, detail = "waiting_retry", work.retryDetail
+		}
 	case p.lastError != "" && time.Now().Before(p.errorUntil):
 		state, detail = "error", p.lastError
 	}
@@ -911,7 +884,8 @@ func (p *VoicePlugin) publishStatusLocked() {
 		p.cleanupTransientHotkeysLocked()
 		return
 	}
-	p.syncTransientHotkeysLocked(recording || stopping || p.pendingDone > 0 || errorActive, errorActive)
+	_, retryWork := p.retryTaskLocked()
+	p.syncTransientHotkeysLocked(recording || stopping || p.pendingDone > 0 || errorActive, errorActive || retryWork != nil)
 }
 
 func (p *VoicePlugin) publishErrorLocked(detail string, sessionID uint64) {
@@ -930,12 +904,6 @@ func (p *VoicePlugin) publishErrorLocked(detail string, sessionID uint64) {
 	})
 	p.publishStatusSnapshotLocked("error", detail, false, false, time.Time{}, sessionID)
 	p.syncTransientHotkeysLocked(true, true)
-}
-
-func (p *VoicePlugin) publishError(detail string, sessionID uint64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.publishErrorLocked(detail, sessionID)
 }
 
 func (p *VoicePlugin) publishStatusSnapshotLocked(state, detail string, recording, stopping bool, stopAt time.Time, sessionID uint64) {
@@ -1016,36 +984,6 @@ func asrConnectErrorDetail(err error) string {
 		return "认证失败，请检查 App Key 或 Access Key。"
 	}
 	return shortError(err)
-}
-
-func (p *VoicePlugin) streamAudio(ctx context.Context, rec *Recorder, client *ASRClient) {
-	buf := make([]byte, 6400)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		n, err := rec.Read(buf)
-		if n > 0 {
-			sendCtx, sendCancel := context.WithTimeout(ctx, audioSendTimeout)
-			sendErr := client.SendAudio(sendCtx, buf[:n], false)
-			sendCancel()
-			if sendErr != nil {
-				if ctx.Err() == nil {
-					p.logger.Error("send audio error", "error", sendErr)
-				}
-				return
-			}
-		}
-		if err == io.EOF || (err != nil && ctx.Err() != nil) {
-			return
-		}
-		if err != nil {
-			p.logger.Error("read audio error", "error", err)
-			return
-		}
-	}
 }
 
 func writeClipboard(text string) error {

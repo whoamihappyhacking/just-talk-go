@@ -12,9 +12,18 @@ import (
 )
 
 type Config struct {
-	Voice   VoiceConfig   `toml:"voice"`
-	Debug   DebugConfig   `toml:"debug"`
-	Overlay OverlayConfig `toml:"overlay"`
+	Voice      VoiceConfig      `toml:"voice"`
+	Debug      DebugConfig      `toml:"debug"`
+	Overlay    OverlayConfig    `toml:"overlay"`
+	StatusFile StatusFileConfig `toml:"status_file"`
+}
+
+// StatusFileConfig publishes recording state for external status bars, such
+// as the Omarchy Quickshell bar widget, instead of the built-in overlay.
+type StatusFileConfig struct {
+	Enabled bool `toml:"enabled"`
+	// Empty selects $XDG_RUNTIME_DIR/just-talk/status.json.
+	Path string `toml:"path"`
 }
 
 type DebugConfig struct {
@@ -38,6 +47,7 @@ type VoiceConfig struct {
 	StopDelayMs int      `toml:"stop_delay_ms"`
 	Language    string   `toml:"language"`
 	AutoSubmit  bool     `toml:"auto_submit"`
+	SaveTraffic bool     `toml:"save_traffic"` // Stop, then submit one whole-file HTTP request.
 	AppKey      string   `toml:"app_key"`
 	AccessKey   string   `toml:"access_key"`
 	ResourceID  string   `toml:"resource_id"`
