@@ -274,6 +274,12 @@ wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0
 wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.85
 ```
 
+同一段话被上屏两次，几乎都是同时跑了两个实例。Wayland 下热键用的是被动读取 `/dev/input/event*`，不独占设备，所以两个进程会收到同一次热键，各自识别、各自上屏。现在第二个实例启动时会直接报错退出；如果还在用旧版本，先确认只剩一个进程：
+
+```bash
+pgrep -a just-talk
+```
+
 ## 更新日志
 
 见 [CHANGELOG.md](CHANGELOG.md)。

@@ -274,6 +274,12 @@ wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0
 wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.85
 ```
 
+The same sentence pasted twice almost always means two instances are running. Wayland hotkeys read `/dev/input/event*` passively without grabbing the devices, so both processes see the same hotkey and each one recognizes and pastes it. A second instance now fails to start with an explicit error; on an older build, confirm only one process is left:
+
+```bash
+pgrep -a just-talk
+```
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).

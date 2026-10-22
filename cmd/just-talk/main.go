@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/c/just-talk-go/engine"
 	"github.com/c/just-talk-go/hotkey"
 	"github.com/c/just-talk-go/internal/doctor"
+	"github.com/c/just-talk-go/internal/singleton"
 	"github.com/c/just-talk-go/internal/tui"
 	"github.com/c/just-talk-go/plugins"
 	"github.com/c/just-talk-go/plugins/overlay"
@@ -94,6 +96,25 @@ func main() {
 		os.Setenv("JUST_TALK_BACKEND", *backend)
 	}
 
+	// Claim the desktop before the doctor opens the microphone: a second
+	// instance would answer the same hotkey and paste the same sentence again,
+	// so it should fail before competing for the input device. --doctor only
+	// reports, so it still runs alongside a live instance.
+	var lock *singleton.Lock
+	if !*doctorOnly {
+		lock, err = singleton.Acquire("just-talk")
+		if err != nil {
+			var running *singleton.AlreadyRunningError
+			if errors.As(err, &running) {
+				printAlreadyRunning(running)
+				os.Exit(1)
+			}
+			logger.Warn("single-instance lock unavailable", "error", err)
+		} else {
+			defer lock.Release()
+		}
+	}
+
 	report := doctor.Run(cfg, *backend)
 	if *doctorOnly || !report.Healthy() {
 		report.Print(os.Stderr)
@@ -163,6 +184,16 @@ func createProvider(backend string) (hotkey.Provider, error) {
 		return hotkey.NewMockProvider(), nil
 	}
 	return hotkey.NewProvider()
+}
+
+func printAlreadyRunning(running *singleton.AlreadyRunningError) {
+	fmt.Fprintf(os.Stderr, "%s，本次启动已终止。\n", running)
+	fmt.Fprintln(os.Stderr, "两个实例会同时响应同一个热键：同一段话被识别两次，文字也会被上屏两次。")
+	if running.PID > 0 {
+		fmt.Fprintf(os.Stderr, "处理：先退出已有实例（kill %d），再重新启动。\n", running.PID)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "处理：先退出已有实例，再重新启动。")
 }
 
 func printTroubleshooting(err error) {

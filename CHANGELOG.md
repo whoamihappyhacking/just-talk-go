@@ -4,6 +4,7 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- Refuse to start a second instance. Nothing used to stop two processes from sharing one hotkey — the Wayland provider reads `/dev/input/event*` passively and never grabs the devices, so evdev delivered every hotkey to every reader, and both instances recorded, recognized, and pasted the same speech. That reached the user as one sentence pasted twice. Startup now takes an exclusive lock under `$XDG_RUNTIME_DIR/just-talk` (`%LOCALAPPDATA%` on Windows) and reports the running PID instead. `--doctor`, `--install`, and `--overlay-helper` do not take the lock.
 - Classify ASR server error responses: codes that reject the request itself (`45xxxxxx`) skip the reconnect ladder and wait for an explicit retry, while server-side faults (`55xxxxxx`) and the upload-stall timeout still reconnect. Replaying a whole recording is the most expensive thing a weak link does, so a request the server already refused no longer costs three replays.
 - Document what `voice.save_traffic` really is: a transport switch, not a bandwidth optimization. Whole-file mode sends about 33% more bytes as Base64 but never replays the recording after a dropped connection; the README and the TUI help now say so instead of implying savings.
 - Fix a blurry recording capsule on HiDPI Wayland outputs. The layer surface never set a buffer scale, so a logical-resolution buffer was upscaled by the compositor. The surface now keeps its logical size while the pixel buffer follows the output scale.
