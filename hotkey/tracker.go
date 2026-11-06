@@ -115,8 +115,8 @@ func (t *KeyStateTracker) KeyDown(key KeyCode, now time.Time) []Event {
 	t.pressed[key] = keyState{pressed: true, pressedAt: now}
 
 	// Track modifiers
-	if mod := KeyCodeToModifier(key); mod != ModNone {
-		t.activeMods |= mod
+	if key.IsModifier() {
+		t.recomputeModsLocked()
 	}
 
 	// Track last non-modifier key
@@ -126,30 +126,35 @@ func (t *KeyStateTracker) KeyDown(key KeyCode, now time.Time) []Event {
 
 	// Check watched combos: standard modifier+key combos
 	if !key.IsModifier() {
-		combo := Combo{Mods: t.activeMods, Key: key}
-		if combo.Mods != ModNone {
-			if _, ok := t.watched[combo]; !ok {
-				return events
+		if t.activeMods != ModNone {
+			for combo := range t.watched {
+				if combo.Key != key || combo.Mods == ModNone || !t.activeMods.Satisfies(combo.Mods) {
+					continue
+				}
+				t.activeStandardCombos[combo] = true
+				events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
 			}
-			t.activeStandardCombos[combo] = true
-			events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
 		}
 	} else {
 		for pressedKey := range t.pressed {
 			if pressedKey.IsModifier() {
 				continue
 			}
-			combo := Combo{Mods: t.activeMods, Key: pressedKey}
-			if _, ok := t.watched[combo]; ok && !t.activeStandardCombos[combo] {
-				t.activeStandardCombos[combo] = true
-				events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
+			for combo := range t.watched {
+				if combo.Key != pressedKey || combo.Mods == ModNone || t.activeStandardCombos[combo] {
+					continue
+				}
+				if t.activeMods.Satisfies(combo.Mods) {
+					t.activeStandardCombos[combo] = true
+					events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
+				}
 			}
 		}
 		for combo, active := range t.activeModifierCombos {
 			if active {
 				continue
 			}
-			if t.activeMods&combo.Mods == combo.Mods {
+			if t.activeMods.Includes(combo.Mods) {
 				t.activeModifierCombos[combo] = true
 				events = append(events, Event{Combo: combo, Type: KeyDown, Time: now})
 			}
@@ -178,15 +183,18 @@ func (t *KeyStateTracker) KeyUp(key KeyCode, now time.Time) []Event {
 	delete(t.pressed, key)
 
 	// Track modifiers
-	if mod := KeyCodeToModifier(key); mod != ModNone {
-		t.activeMods &^= mod
+	if key.IsModifier() {
+		t.recomputeModsLocked()
 	}
 
 	// Fire KeyUp for active standard combos as soon as any member of the
 	// combo is released. Hold-mode users expect recording to stop when they
 	// release either the character key or any required modifier.
 	for combo, active := range t.activeStandardCombos {
-		if active && comboReleasedByKey(combo, key) {
+		if !active {
+			continue
+		}
+		if combo.Key == key || (key.IsModifier() && !t.activeMods.Includes(combo.Mods)) {
 			delete(t.activeStandardCombos, combo)
 			events = append(events, Event{Combo: combo, Type: KeyUp, Time: now})
 		}
@@ -203,7 +211,7 @@ func (t *KeyStateTracker) KeyUp(key KeyCode, now time.Time) []Event {
 			if !active {
 				continue
 			}
-			if t.activeMods&combo.Mods != combo.Mods {
+			if !t.activeMods.Includes(combo.Mods) {
 				t.activeModifierCombos[combo] = false
 				events = append(events, Event{Combo: combo, Type: KeyUp, Time: now})
 			}
@@ -223,6 +231,17 @@ func (t *KeyStateTracker) KeyUp(key KeyCode, now time.Time) []Event {
 	}
 
 	return events
+}
+
+// recomputeModsLocked derives the modifier mask from the held keys, so
+// releasing one side of a modifier keeps the family active while the other
+// side is still held.
+func (t *KeyStateTracker) recomputeModsLocked() {
+	var mods Modifier
+	for k := range t.pressed {
+		mods |= KeyCodeToModifier(k)
+	}
+	t.activeMods = mods
 }
 
 // ActiveMods returns the currently active modifier mask.
@@ -283,14 +302,4 @@ func (t *KeyStateTracker) modifierToKeyCode(mods Modifier) []KeyCode {
 		keys = append(keys, KeySuper)
 	}
 	return keys
-}
-
-func comboReleasedByKey(combo Combo, key KeyCode) bool {
-	if combo.Key == key {
-		return true
-	}
-	if mod := KeyCodeToModifier(key); mod != ModNone {
-		return combo.Mods&mod != 0
-	}
-	return false
 }

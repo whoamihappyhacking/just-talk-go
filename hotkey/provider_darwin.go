@@ -118,8 +118,8 @@ var darwinKeyToUnified = map[uint16]KeyCode{
 	0x1D: Key0, 0x12: Key1, 0x13: Key2, 0x14: Key3, 0x15: Key4,
 	0x17: Key5, 0x16: Key6, 0x1A: Key7, 0x1C: Key8, 0x19: Key9,
 
-	0x3B: KeyCtrl, 0x3A: KeyAlt, 0x38: KeyShift, 0x37: KeySuper,
-	0x3E: KeyCtrl, 0x3D: KeyAlt, 0x3C: KeyShift, 0x36: KeySuper,
+	0x3B: KeyLeftCtrl, 0x3A: KeyLeftAlt, 0x38: KeyLeftShift, 0x37: KeyLeftSuper,
+	0x3E: KeyRightCtrl, 0x3D: KeyRightAlt, 0x3C: KeyRightShift, 0x36: KeyRightSuper,
 
 	0x7A: KeyF1, 0x78: KeyF2, 0x63: KeyF3, 0x76: KeyF4,
 	0x60: KeyF5, 0x61: KeyF6, 0x62: KeyF7, 0x64: KeyF8,
@@ -139,6 +139,22 @@ var darwinKeyToUnified = map[uint16]KeyCode{
 	0x2B: KeyComma, 0x2F: KeyPeriod, 0x2C: KeySlash,
 }
 
+// Device-dependent modifier bits in CGEventFlags (NX_DEVICE*KEYMASK in
+// IOKit/hidsystem/IOLLEvent.h). They identify which physical side is held.
+var darwinDeviceModifierFlags = []struct {
+	flag uint64
+	mod  Modifier
+}{
+	{0x00000001, ModLeftCtrl},
+	{0x00002000, ModRightCtrl},
+	{0x00000002, ModLeftShift},
+	{0x00000004, ModRightShift},
+	{0x00000008, ModLeftSuper},
+	{0x00000010, ModRightSuper},
+	{0x00000020, ModLeftAlt},
+	{0x00000040, ModRightAlt},
+}
+
 func darwinFlagsToMods(flags C.uint64_t) Modifier {
 	var m Modifier
 	if flags&C.kCGEventFlagMaskControl != 0 {
@@ -153,7 +169,25 @@ func darwinFlagsToMods(flags C.uint64_t) Modifier {
 	if flags&C.kCGEventFlagMaskCommand != 0 {
 		m |= ModSuper
 	}
+	for _, d := range darwinDeviceModifierFlags {
+		// Ignore stale side bits for a family the coalesced flags no longer hold.
+		if uint64(flags)&d.flag != 0 && m&d.mod.Families() != 0 {
+			m |= d.mod
+		}
+	}
 	return m
+}
+
+// darwinFlagsChangedMods returns the held modifiers for a flags-changed
+// event on key. Synthetic events may omit the device-dependent side bits;
+// then the family is attributed to the side of the key that changed it.
+func darwinFlagsChangedMods(flags C.uint64_t, key KeyCode) Modifier {
+	mods := darwinFlagsToMods(flags)
+	keyMod := KeyCodeToModifier(key)
+	if keyMod.HasSide() && mods&keyMod.Families() != 0 && mods.sidesOf(keyMod) == ModNone {
+		mods |= keyMod
+	}
+	return mods
 }
 
 type darwinProvider struct {
@@ -373,7 +407,6 @@ func (p *darwinProvider) handleCGEvent() {
 	evtType := p.evtBuf[evtTypeOff]
 	timeMs := int64(binary.LittleEndian.Uint64(p.evtBuf[timeMsOff : timeMsOff+8]))
 
-	mods := darwinFlagsToMods(C.uint64_t(flags))
 	now := time.UnixMilli(timeMs)
 
 	var events []Event
@@ -392,7 +425,7 @@ func (p *darwinProvider) handleCGEvent() {
 		events = p.tracker.KeyUp(key, now)
 	case C.BRIDGE_FLAGS_CHANGED:
 		key := darwinKeyToUnified[keycode]
-		events = p.processFlagsChanged(key, mods, now)
+		events = p.processFlagsChanged(key, darwinFlagsChangedMods(C.uint64_t(flags), key), now)
 	}
 
 	p.mu.Lock()
@@ -409,16 +442,16 @@ func (p *darwinProvider) handleCGEvent() {
 
 func (p *darwinProvider) processFlagsChanged(key KeyCode, mods Modifier, now time.Time) []Event {
 	var events []Event
-	if key != KeyNone {
+	if key.IsModifier() {
 		// Keep the generic tracker state current for regular modifier+key combos.
-		if mods&KeyCodeToModifier(key) != 0 {
+		if mods.Includes(KeyCodeToModifier(key)) {
 			events = append(events, p.tracker.KeyDown(key, now)...)
 		} else {
 			events = append(events, p.tracker.KeyUp(key, now)...)
 		}
 	}
 	for combo, active := range p.activeModifierCombos {
-		nowActive := mods&combo.Mods == combo.Mods
+		nowActive := mods.Includes(combo.Mods)
 		switch {
 		case nowActive && !active:
 			p.activeModifierCombos[combo] = true

@@ -197,6 +197,7 @@ push_to_talk = "Alt+Super"
 Voice hotkeys only support keys suitable for global shortcuts:
 
 - Supported: modifier-only combinations, such as `Alt+Super` and `Ctrl+Alt+Shift`.
+- Supported: side-specific modifiers, such as `RightAlt` (`RightOption`), `RightCtrl`, `RightShift`, and `RightSuper` (`RightCmd`, `RightWin`), plus the matching `Left…` names. `Alt` accepts either side, while `RightAlt` only accepts the right key; they also combine, as in `RightCtrl+F9`. On keyboard layouts that turn right Alt into AltGr, such as German, right Alt is no longer an Alt key and cannot be used as `RightAlt`.
 - Supported: function keys `F1` through `F24`, such as `F9` and `Alt+F8`.
 - Supported: non-text control and navigation keys, such as `Tab`, `Enter`, `Escape`, `Backspace`, `CapsLock`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, and `Delete`.
 - Not supported: letters, digits, punctuation, Space, numpad digits, and numpad symbols that can enter text, such as `Alt+G`, `G`, `Alt+1`, and `Alt+Space`.
@@ -214,6 +215,8 @@ macOS hotkey example:
 [voice]
 # Option is Alt; Command/Cmd is Super.
 push_to_talk = "Option+Command"
+# Right Option alone:
+# push_to_talk = "RightOption"
 ```
 
 On Windows, `Win` and `Super` both refer to the Windows logo key. If recording is unavailable, allow desktop applications to access the microphone under Windows Settings > Privacy & security > Microphone.

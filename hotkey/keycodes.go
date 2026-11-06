@@ -6,7 +6,7 @@ package hotkey
 //
 //	0        - KeyNone (reserved)
 //	1..255   - Regular keys (A-Z, 0-9, punctuation — mapped to platform scan/virtual codes)
-//	256..289  - Modifier virtual keys (Ctrl, Alt, Shift, Super)
+//	256..289  - Modifier virtual keys (Ctrl, Alt, Shift, Super, and their sides)
 //	290..313  - Function keys (F1-F24)
 //	314..349  - Navigation keys (arrows, home, end, etc.)
 //	350..    - Reserved for future expansion
@@ -121,14 +121,25 @@ const (
 	KeyNumLock     KeyCode = 83
 )
 
-// ---- Modifier virtual keys (256..259) ----
+// ---- Modifier virtual keys (256..267) ----
 // These are virtual key codes for the modifier keys themselves,
-// used when registering modifier-only hotkeys.
+// used when registering modifier-only hotkeys. The side-specific codes
+// identify the physical key; the generic codes are for sources that only
+// report a modifier family.
 const (
 	KeyCtrl  KeyCode = 256
 	KeyAlt   KeyCode = 257
 	KeyShift KeyCode = 258
 	KeySuper KeyCode = 259
+
+	KeyLeftCtrl   KeyCode = 260
+	KeyRightCtrl  KeyCode = 261
+	KeyLeftAlt    KeyCode = 262
+	KeyRightAlt   KeyCode = 263
+	KeyLeftShift  KeyCode = 264
+	KeyRightShift KeyCode = 265
+	KeyLeftSuper  KeyCode = 266
+	KeyRightSuper KeyCode = 267
 )
 
 // ---- Function keys (290..313) ----
@@ -220,6 +231,15 @@ var keyNames = map[KeyCode]string{
 	KeyShift: "Shift",
 	KeySuper: "Super",
 
+	KeyLeftCtrl:   "LeftCtrl",
+	KeyRightCtrl:  "RightCtrl",
+	KeyLeftAlt:    "LeftAlt",
+	KeyRightAlt:   "RightAlt",
+	KeyLeftShift:  "LeftShift",
+	KeyRightShift: "RightShift",
+	KeyLeftSuper:  "LeftSuper",
+	KeyRightSuper: "RightSuper",
+
 	KeyF1: "F1", KeyF2: "F2", KeyF3: "F3", KeyF4: "F4",
 	KeyF5: "F5", KeyF6: "F6", KeyF7: "F7", KeyF8: "F8",
 	KeyF9: "F9", KeyF10: "F10", KeyF11: "F11", KeyF12: "F12",
@@ -238,7 +258,7 @@ func (k KeyCode) String() string {
 
 // IsModifier returns true if the key code is a modifier virtual key.
 func (k KeyCode) IsModifier() bool {
-	return k >= KeyCtrl && k <= KeySuper
+	return k >= KeyCtrl && k <= KeyRightSuper
 }
 
 // IsFunctionKey returns true if the key code is a function key (F1-F24).
@@ -269,8 +289,9 @@ func (k KeyCode) IsTextKey() bool {
 	}
 }
 
-// KeyCodeToModifier converts a modifier KeyCode to the corresponding Modifier bit.
-// Returns the ModNone if the key code is not a modifier.
+// KeyCodeToModifier converts a modifier KeyCode to the corresponding Modifier bits.
+// Side-specific keys include their side bit. Returns ModNone if the key code
+// is not a modifier.
 func KeyCodeToModifier(k KeyCode) Modifier {
 	switch k {
 	case KeyCtrl:
@@ -281,7 +302,33 @@ func KeyCodeToModifier(k KeyCode) Modifier {
 		return ModShift
 	case KeySuper:
 		return ModSuper
+	case KeyLeftCtrl:
+		return ModLeftCtrl
+	case KeyRightCtrl:
+		return ModRightCtrl
+	case KeyLeftAlt:
+		return ModLeftAlt
+	case KeyRightAlt:
+		return ModRightAlt
+	case KeyLeftShift:
+		return ModLeftShift
+	case KeyRightShift:
+		return ModRightShift
+	case KeyLeftSuper:
+		return ModLeftSuper
+	case KeyRightSuper:
+		return ModRightSuper
 	default:
 		return ModNone
 	}
+}
+
+// coversKey reports whether a held key satisfies a query for want: the
+// same key, or any side of a generic modifier family.
+func (k KeyCode) coversKey(want KeyCode) bool {
+	if k == want {
+		return true
+	}
+	wantMod := KeyCodeToModifier(want)
+	return wantMod != ModNone && !wantMod.HasSide() && KeyCodeToModifier(k).Families() == wantMod
 }

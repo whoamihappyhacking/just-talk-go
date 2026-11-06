@@ -87,10 +87,10 @@ var x11KeysymToUnified = map[C.KeySym]KeyCode{
 	C.XK_0: Key0, C.XK_1: Key1, C.XK_2: Key2, C.XK_3: Key3, C.XK_4: Key4,
 	C.XK_5: Key5, C.XK_6: Key6, C.XK_7: Key7, C.XK_8: Key8, C.XK_9: Key9,
 
-	C.XK_Control_L: KeyCtrl, C.XK_Control_R: KeyCtrl,
-	C.XK_Alt_L: KeyAlt, C.XK_Alt_R: KeyAlt,
-	C.XK_Shift_L: KeyShift, C.XK_Shift_R: KeyShift,
-	C.XK_Super_L: KeySuper, C.XK_Super_R: KeySuper,
+	C.XK_Control_L: KeyLeftCtrl, C.XK_Control_R: KeyRightCtrl,
+	C.XK_Alt_L: KeyLeftAlt, C.XK_Alt_R: KeyRightAlt,
+	C.XK_Shift_L: KeyLeftShift, C.XK_Shift_R: KeyRightShift,
+	C.XK_Super_L: KeyLeftSuper, C.XK_Super_R: KeyRightSuper,
 
 	C.XK_F1: KeyF1, C.XK_F2: KeyF2, C.XK_F3: KeyF3, C.XK_F4: KeyF4,
 	C.XK_F5: KeyF5, C.XK_F6: KeyF6, C.XK_F7: KeyF7, C.XK_F8: KeyF8,
@@ -114,6 +114,17 @@ var x11KeysymToUnified = map[C.KeySym]KeyCode{
 	C.XK_semicolon: KeySemicolon, C.XK_apostrophe: KeyQuote,
 	C.XK_comma: KeyComma, C.XK_period: KeyPeriod,
 	C.XK_slash: KeySlash,
+}
+
+// Side-specific modifier keysyms, in modifierFamilies order.
+var x11ModifierKeysyms = []struct {
+	keysym C.KeySym
+	key    KeyCode
+}{
+	{C.XK_Control_L, KeyLeftCtrl}, {C.XK_Control_R, KeyRightCtrl},
+	{C.XK_Alt_L, KeyLeftAlt}, {C.XK_Alt_R, KeyRightAlt},
+	{C.XK_Shift_L, KeyLeftShift}, {C.XK_Shift_R, KeyRightShift},
+	{C.XK_Super_L, KeyLeftSuper}, {C.XK_Super_R, KeyRightSuper},
 }
 
 type x11Provider struct {
@@ -333,10 +344,19 @@ func (p *x11Provider) handleKeyEvent(event *C.XEvent, isRelease bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	var sides Modifier
+	sidesQueried := false
+	heldSides := func() Modifier {
+		if !sidesQueried {
+			sides, sidesQueried = p.queryModifierSides(), true
+		}
+		return sides
+	}
+
 	// Check registered combos
 	for combo, ch := range p.channels {
 		if isRelease {
-			if p.activeCombos[combo] && x11ComboReleasedByKey(combo, key) {
+			if p.activeCombos[combo] && releaseEndsCombo(combo, key) {
 				delete(p.activeCombos, combo)
 				select {
 				case ch <- Event{Combo: combo, Type: KeyUp, Time: now}:
@@ -345,7 +365,7 @@ func (p *x11Provider) handleKeyEvent(event *C.XEvent, isRelease bool) {
 			}
 			continue
 		}
-		if p.comboMatches(combo, key, mods) && !p.activeCombos[combo] {
+		if !p.activeCombos[combo] && p.comboMatches(combo, key, mods, heldSides) {
 			p.activeCombos[combo] = true
 			select {
 			case ch <- Event{Combo: combo, Type: KeyDown, Time: now}:
@@ -355,30 +375,44 @@ func (p *x11Provider) handleKeyEvent(event *C.XEvent, isRelease bool) {
 	}
 }
 
-func (p *x11Provider) comboMatches(combo Combo, key KeyCode, mods Modifier) bool {
-	// For modifier-only combos: check if the pressed key is one of the
-	// required modifiers, and the full set of held modifiers matches.
+// comboMatches reports whether a key press completes combo. mods holds the
+// modifier families from the X11 state, which reflects modifiers held before
+// this key and carries no side information; heldSides queries the physical
+// sides only when the combo names one.
+func (p *x11Provider) comboMatches(combo Combo, key KeyCode, mods Modifier, heldSides func() Modifier) bool {
+	held := mods
 	if combo.IsModifierOnly() {
+		// The triggering key must be one of the required modifiers.
 		keyMod := KeyCodeToModifier(key)
-		if keyMod == ModNone {
+		if keyMod == ModNone || combo.Mods&keyMod.Families() == 0 {
 			return false
 		}
-		// The triggering key must be part of the combo
-		if combo.Mods&keyMod == 0 {
-			return false
+		held |= keyMod
+	} else if combo.Key != key {
+		return false
+	}
+	if held.Families() != combo.Mods.Families() {
+		return false
+	}
+	if !held.Includes(combo.Mods) {
+		held |= heldSides()
+	}
+	return held.Satisfies(combo.Mods)
+}
+
+// queryModifierSides returns the side-specific modifiers whose keys are
+// physically down.
+func (p *x11Provider) queryModifierSides() Modifier {
+	var keys [32]C.char
+	C.XQueryKeymap(p.display, &keys[0])
+	var mods Modifier
+	for _, m := range x11ModifierKeysyms {
+		keycode := uint(C.XKeysymToKeycode(p.display, m.keysym))
+		if keycode != 0 && keycode < 256 && byte(keys[keycode/8])&(1<<(keycode%8)) != 0 {
+			mods |= KeyCodeToModifier(m.key)
 		}
-		// mods = modifiers held BEFORE this key event.
-		// The full set of held modifiers = mods + keyMod.
-		actualMods := mods | keyMod
-		return actualMods == combo.Mods
 	}
-
-	// For standard combos: match key and modifiers exactly
-	if combo.Key == key && combo.Mods == mods {
-		return true
-	}
-
-	return false
+	return mods
 }
 
 func (p *x11Provider) Stop() error {
@@ -462,6 +496,8 @@ func (p *x11Provider) modifierOnlyGrabs(mods Modifier) []x11Grab {
 	if len(modKeys) == 0 {
 		return nil
 	}
+	// Prefix modifiers can only be grabbed by family; comboMatches checks
+	// their sides. A sided trigger only needs the keysym for that side.
 
 	var grabs []x11Grab
 	for i, trigger := range modKeys {
@@ -472,7 +508,7 @@ func (p *x11Provider) modifierOnlyGrabs(mods Modifier) []x11Grab {
 				prefixMask |= modsToX11Mask(other)
 			}
 		}
-		keysyms := modifierToKeysyms(trigger)
+		keysyms := modifierToKeysyms(trigger, mods)
 		if len(keysyms) == 0 {
 			continue
 		}
@@ -498,19 +534,18 @@ func modifierBits(mods Modifier) []Modifier {
 	return bits
 }
 
-// modifierToKeysyms maps a single Modifier bit to all matching X11 keysyms.
-func modifierToKeysyms(m Modifier) []C.KeySym {
-	switch m {
-	case ModCtrl:
-		return []C.KeySym{C.XK_Control_L, C.XK_Control_R}
-	case ModAlt:
-		return []C.KeySym{C.XK_Alt_L, C.XK_Alt_R}
-	case ModShift:
-		return []C.KeySym{C.XK_Shift_L, C.XK_Shift_R}
-	case ModSuper:
-		return []C.KeySym{C.XK_Super_L, C.XK_Super_R}
+// modifierToKeysyms maps a single modifier family to the X11 keysyms that
+// can trigger it, limited to the side required names, if any.
+func modifierToKeysyms(family, required Modifier) []C.KeySym {
+	side := required.sidesOf(family)
+	var keysyms []C.KeySym
+	for _, m := range x11ModifierKeysyms {
+		mod := KeyCodeToModifier(m.key)
+		if mod.Families() == family && (side == ModNone || mod&side != 0) {
+			keysyms = append(keysyms, m.keysym)
+		}
 	}
-	return nil
+	return keysyms
 }
 
 // Legacy: kept for Unregister compatibility
@@ -571,14 +606,4 @@ func getEnvOrDefault(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
-}
-
-func x11ComboReleasedByKey(combo Combo, key KeyCode) bool {
-	if combo.Key == key {
-		return true
-	}
-	if mod := KeyCodeToModifier(key); mod != ModNone {
-		return combo.Mods&mod != 0
-	}
-	return false
 }

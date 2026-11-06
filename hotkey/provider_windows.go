@@ -142,10 +142,12 @@ var winVKToKey = map[uint32]KeyCode{
 	vkNumpad6: KeyNum6, vkNumpad7: KeyNum7, vkNumpad8: KeyNum8,
 	vkNumpad9: KeyNum9,
 
-	vkControl: KeyCtrl, vkLControl: KeyCtrl, vkRControl: KeyCtrl,
-	vkMenu: KeyAlt, vkLMenu: KeyAlt, vkRMenu: KeyAlt,
-	vkShift: KeyShift, vkLShift: KeyShift, vkRShift: KeyShift,
-	vkLWin: KeySuper, vkRWin: KeySuper,
+	// The generic VKs carry no side; GetAsyncKeyState and low-level hooks
+	// report the side-specific ones for physical keys.
+	vkControl: KeyCtrl, vkLControl: KeyLeftCtrl, vkRControl: KeyRightCtrl,
+	vkMenu: KeyAlt, vkLMenu: KeyLeftAlt, vkRMenu: KeyRightAlt,
+	vkShift: KeyShift, vkLShift: KeyLeftShift, vkRShift: KeyRightShift,
+	vkLWin: KeyLeftSuper, vkRWin: KeyRightSuper,
 
 	vkF1: KeyF1, vkF2: KeyF2, vkF3: KeyF3, vkF4: KeyF4,
 	vkF5: KeyF5, vkF6: KeyF6, vkF7: KeyF7, vkF8: KeyF8,
@@ -379,7 +381,7 @@ func (p *windowsProvider) hookKeyDown(key KeyCode) bool {
 	p.hookMu.RLock()
 	defer p.hookMu.RUnlock()
 	for virtualKey, down := range p.hookDown {
-		if down && winVKToKey[virtualKey] == key {
+		if down && winVKToKey[virtualKey].coversKey(key) {
 			return true
 		}
 	}
@@ -460,7 +462,8 @@ func (p *windowsProvider) reconcileHookModifiersLocked(physicalMods Modifier, no
 		p.clearHookMismatchLocked()
 		return ModNone
 	}
-	missing := hookMods &^ physicalMods
+	// A family-only physical reading cannot contradict either side.
+	missing := hookMods &^ physicalMods.withUnknownSides()
 	if missing == ModNone {
 		p.clearHookMismatchLocked()
 		return ModNone
@@ -611,7 +614,7 @@ func windowsComboActive(combo Combo, keyDown func(KeyCode) bool) bool {
 
 func windowsComboActiveWithModifiers(combo Combo, mods Modifier, keyDown func(KeyCode) bool) bool {
 	if combo.IsModifierOnly() {
-		return mods == combo.Mods
+		return mods.Satisfies(combo.Mods)
 	}
 	if !keyDown(combo.Key) {
 		return false
@@ -619,7 +622,16 @@ func windowsComboActiveWithModifiers(combo Combo, mods Modifier, keyDown func(Ke
 	if combo.IsKeyOnly() {
 		return mods == ModNone
 	}
-	return mods == combo.Mods
+	return mods.Satisfies(combo.Mods)
+}
+
+// windowsModifierKeys lists the keys whose state makes up the modifier mask.
+// The generic keys keep the family when a source only reports VK_MENU and
+// friends; the side-specific keys add which physical key is held.
+var windowsModifierKeys = []KeyCode{
+	KeyCtrl, KeyAlt, KeyShift, KeySuper,
+	KeyLeftCtrl, KeyRightCtrl, KeyLeftAlt, KeyRightAlt,
+	KeyLeftShift, KeyRightShift, KeyLeftSuper, KeyRightSuper,
 }
 
 func windowsActiveModifiers(keyDown func(KeyCode) bool) Modifier {
@@ -627,24 +639,17 @@ func windowsActiveModifiers(keyDown func(KeyCode) bool) Modifier {
 		return ModNone
 	}
 	var mods Modifier
-	if keyDown(KeyCtrl) {
-		mods |= ModCtrl
-	}
-	if keyDown(KeyAlt) {
-		mods |= ModAlt
-	}
-	if keyDown(KeyShift) {
-		mods |= ModShift
-	}
-	if keyDown(KeySuper) {
-		mods |= ModSuper
+	for _, key := range windowsModifierKeys {
+		if keyDown(key) {
+			mods |= KeyCodeToModifier(key)
+		}
 	}
 	return mods
 }
 
 func windowsKeyDown(key KeyCode) bool {
 	for virtualKey, mapped := range winVKToKey {
-		if mapped != key {
+		if !mapped.coversKey(key) {
 			continue
 		}
 		state, _, _ := procGetAsyncKeyState.Call(uintptr(virtualKey))

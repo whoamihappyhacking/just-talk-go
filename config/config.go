@@ -137,10 +137,29 @@ func DefaultPath() string {
 
 // ---- Hotkey parser ----
 
-var modifierNames = map[string]hotkey.Modifier{
-	"ctrl": hotkey.ModCtrl, "alt": hotkey.ModAlt, "shift": hotkey.ModShift,
-	"control": hotkey.ModCtrl, "option": hotkey.ModAlt, "super": hotkey.ModSuper,
-	"cmd": hotkey.ModSuper, "command": hotkey.ModSuper, "win": hotkey.ModSuper,
+var modifierNames = buildModifierNames()
+
+// buildModifierNames maps every modifier alias to its family, plus Left/Right
+// variants such as RightOption or LeftCtrl that only match that physical key.
+func buildModifierNames() map[string]hotkey.Modifier {
+	type sided struct{ either, left, right hotkey.Modifier }
+	ctrl := sided{hotkey.ModCtrl, hotkey.ModLeftCtrl, hotkey.ModRightCtrl}
+	alt := sided{hotkey.ModAlt, hotkey.ModLeftAlt, hotkey.ModRightAlt}
+	shift := sided{hotkey.ModShift, hotkey.ModLeftShift, hotkey.ModRightShift}
+	super := sided{hotkey.ModSuper, hotkey.ModLeftSuper, hotkey.ModRightSuper}
+	aliases := map[string]sided{
+		"ctrl": ctrl, "control": ctrl,
+		"alt": alt, "option": alt,
+		"shift": shift,
+		"super": super, "cmd": super, "command": super, "win": super,
+	}
+	m := make(map[string]hotkey.Modifier)
+	for name, mods := range aliases {
+		m[name] = mods.either
+		m["left"+name] = mods.left
+		m["right"+name] = mods.right
+	}
+	return m
 }
 
 var keyNameToCode = buildKeyNameMap()

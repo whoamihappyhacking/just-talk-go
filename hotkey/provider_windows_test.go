@@ -45,6 +45,48 @@ func TestWindowsModifierCombosRequireExactModifiers(t *testing.T) {
 	}
 }
 
+func TestWindowsRightModifierIgnoresLeftKey(t *testing.T) {
+	p := newWindowsTestProvider(t)
+	combo := Combo{Mods: ModRightAlt}
+	pressed := make(map[KeyCode]bool)
+	p.pollKeyDown = func(key KeyCode) bool {
+		for held := range pressed {
+			if held.coversKey(key) {
+				return true
+			}
+		}
+		return false
+	}
+	ch, err := p.Register(combo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pressed[KeyLeftAlt] = true
+	p.poll(time.Now())
+	assertNoWindowsEvent(t, ch)
+	delete(pressed, KeyLeftAlt)
+	p.poll(time.Now())
+	assertNoWindowsEvent(t, ch)
+
+	pressed[KeyRightAlt] = true
+	p.poll(time.Now())
+	assertWindowsEvent(t, ch, combo, KeyDown)
+	delete(pressed, KeyRightAlt)
+	p.poll(time.Now())
+	assertWindowsEvent(t, ch, combo, KeyUp)
+}
+
+func TestWindowsFamilyModifierAcceptsEitherSide(t *testing.T) {
+	combo := Combo{Mods: ModAlt | ModSuper}
+	if !windowsComboActiveWithModifiers(combo, ModRightAlt|ModLeftSuper, nil) {
+		t.Fatal("Alt+Super rejected right Alt with left Win")
+	}
+	if windowsComboActiveWithModifiers(Combo{Mods: ModRightAlt}, ModLeftAlt, nil) {
+		t.Fatal("RightAlt accepted left Alt")
+	}
+}
+
 func TestWindowsHookTracksSystemShortcutsWithoutStuckState(t *testing.T) {
 	p := newWindowsTestProvider(t)
 	combo := Combo{Mods: ModAlt | ModSuper, Key: KeyNone}

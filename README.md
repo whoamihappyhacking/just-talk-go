@@ -197,6 +197,7 @@ push_to_talk = "Alt+Super"
 语音热键只支持适合作为全局快捷键的按键：
 
 - 支持：纯修饰键组合，如 `Alt+Super`、`Ctrl+Alt+Shift`。
+- 支持：区分左右的修饰键，如 `RightAlt`（`RightOption`）、`RightCtrl`、`RightShift`、`RightSuper`（`RightCmd`、`RightWin`），以及对应的 `Left…` 写法。`Alt` 左右两侧都会触发，`RightAlt` 只认右侧那颗键；也可以组合，如 `RightCtrl+F9`。键盘布局把右 Alt 设为 AltGr（如德语布局）时，右 Alt 不再是 Alt 键，不能用作 `RightAlt`。
 - 支持：功能键 `F1` 到 `F24`，如 `F9`、`Alt+F8`。
 - 支持：非文本控制键和导航键，如 `Tab`、`Enter`、`Escape`、`Backspace`、`CapsLock`、`Up`、`Down`、`Left`、`Right`、`Home`、`End`、`PageUp`、`PageDown`、`Insert`、`Delete`。
 - 不支持：字母、数字、标点、空格、数字小键盘数字和符号等会输入文本的按键，如 `Alt+G`、`G`、`Alt+1`、`Alt+Space`。
@@ -214,6 +215,8 @@ macOS 热键写法：
 [voice]
 # Option 等价于 Alt，Command/Cmd 等价于 Super
 push_to_talk = "Option+Command"
+# 只用右侧 Option 单键：
+# push_to_talk = "RightOption"
 ```
 
 Windows 使用 `Win` 或 `Super` 表示 Windows 徽标键。如果麦克风不可用，请在“Windows 设置 → 隐私和安全性 → 麦克风”中允许桌面应用访问麦克风。
