@@ -289,6 +289,7 @@ func (p *VoicePlugin) Init(env engine.PluginEnv) error {
 	p.logger = env.Logger()
 	p.cfg = env.Config()
 	loadTUIStats()
+	prepareCapture()
 	return p.registerFromConfig(env.Config())
 }
 

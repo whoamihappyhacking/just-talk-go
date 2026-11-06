@@ -274,6 +274,15 @@ wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0
 wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.85
 ```
 
+Linux 下没有设置 `voice.device` 时，如果 ALSA 的 `default` 没有指向 PipeWire / PulseAudio（`arecord -L` 里没有 `default` 这一项），Just Talk 会通过正在运行的 PipeWire 或 PulseAudio 录音，而不是直连第一块声卡；直连会因声卡被音频服务占用而报「设备或资源忙」，或者打开一块没有麦克风的声卡。「麦克风输入」检查失败时会列出可用的设备名，可以写进配置：
+
+```toml
+[voice]
+device = "pipewire"   # 或 pipewire:NODE=alsa_input.…、plughw:CARD=Audio,DEV=0
+```
+
+写 `device = "default"` 可强制使用 ALSA 默认设备。
+
 同一段话被上屏两次，几乎都是同时跑了两个实例。Wayland 下热键用的是被动读取 `/dev/input/event*`，不独占设备，所以两个进程会收到同一次热键，各自识别、各自上屏。现在第二个实例启动时会直接报错退出；如果还在用旧版本，先确认只剩一个进程：
 
 ```bash

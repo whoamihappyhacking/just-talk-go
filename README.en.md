@@ -274,6 +274,15 @@ wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0
 wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.85
 ```
 
+On Linux with `voice.device` unset, if ALSA's `default` is not routed to PipeWire or PulseAudio (`arecord -L` lists no `default` entry), Just Talk records through the running PipeWire or PulseAudio instead of opening the first sound card directly. Opening the card directly fails with "Device or resource busy" while the sound server holds it, or picks a card without a microphone. When the "麦克风输入" check fails it lists the device names you can configure:
+
+```toml
+[voice]
+device = "pipewire"   # or pipewire:NODE=alsa_input.…, plughw:CARD=Audio,DEV=0
+```
+
+Set `device = "default"` to force ALSA's default device.
+
 The same sentence pasted twice almost always means two instances are running. Wayland hotkeys read `/dev/input/event*` passively without grabbing the devices, so both processes see the same hotkey and each one recognizes and pastes it. A second instance now fails to start with an explicit error; on an older build, confirm only one process is left:
 
 ```bash

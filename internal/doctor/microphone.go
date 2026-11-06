@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/c/just-talk-go/config"
@@ -25,12 +26,12 @@ func microphoneCheck(cfg *config.Config) Check {
 		return Check{
 			Name: "麦克风输入", OK: false, Severity: Warning,
 			Detail: "无法打开录音设备：" + shortLine(err.Error()),
-			Fix:    "确认录音后端可用，并在配置里选择正确的输入设备。",
+			Fix:    "确认录音后端可用，并在配置里选择正确的输入设备。" + deviceChoices(),
 		}
 	case peak == 0:
 		return Check{
 			Name: "麦克风输入", OK: false, Severity: Warning,
-			Detail: "只录到纯静音（峰值 0）", Fix: micUnmuteHint(),
+			Detail: "只录到纯静音（峰值 0）", Fix: micUnmuteHint() + deviceChoices(),
 		}
 	case peak < micQuietPeak:
 		return Check{
@@ -59,6 +60,19 @@ func micUnmuteHint() string {
 		return "在设置 > 系统 > 声音 > 输入里取消静音并调高输入音量。"
 	}
 	return "取消系统麦克风静音并调高输入音量。"
+}
+
+// deviceChoices names the values voice.device accepts, so a failing
+// microphone check says what to try next.
+func deviceChoices() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	devices, err := voice.ListDevices()
+	if err != nil || len(devices) == 0 {
+		return ""
+	}
+	return "可用的 voice.device：" + strings.Join(devices, "、")
 }
 
 func shortLine(s string) string {

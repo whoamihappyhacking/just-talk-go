@@ -9,6 +9,10 @@ import (
 	"sync"
 )
 
+// prepareCapture starts any slow, one-time capture setup in the background
+// so the first recording does not wait for it. Platforms override it.
+var prepareCapture = func() {}
+
 // Recorder captures audio from the default microphone as PCM 16kHz 16bit mono.
 type Recorder struct {
 	logger   *slog.Logger
